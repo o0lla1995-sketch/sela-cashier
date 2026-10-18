@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
@@ -193,24 +194,7 @@ class QrScanActivity : Activity(), LifecycleOwner {
             .build()
           val executor = Executors.newSingleThreadExecutor()
           analysis.setAnalyzer(executor) { proxy: ImageProxy ->
-            @androidx.camera.core.ExperimentalGetImage
-            val media = proxy.image
-            if (media == null) {
-              proxy.close()
-              return@setAnalyzer
-            }
-            val input = InputImage.fromMediaImage(
-              media, proxy.imageInfo.rotationDegrees,
-            )
-            scanner.process(input)
-              .addOnSuccessListener { barcodes ->
-                val value = barcodes.firstOrNull()?.rawValue
-                if (value != null && value.isNotBlank()) {
-                  vibrate()
-                  runOnUiThread { finishWithResult(value) }
-                }
-              }
-              .addOnCompleteListener { proxy.close() }
+            analyzeFrame(scanner, proxy)
           }
           provider.unbindAll()
           provider.bindToLifecycle(
@@ -224,6 +208,34 @@ class QrScanActivity : Activity(), LifecycleOwner {
       },
       ContextCompat.getMainExecutor(this),
     )
+  }
+
+  @OptIn(ExperimentalGetImage::class)
+  private fun analyzeFrame(
+    scanner: com.google.mlkit.vision.barcode.BarcodeScanner,
+    proxy: ImageProxy,
+  ) {
+    try {
+      val media = proxy.image
+      if (media == null) {
+        proxy.close()
+        return
+      }
+      val input = InputImage.fromMediaImage(
+        media, proxy.imageInfo.rotationDegrees,
+      )
+      scanner.process(input)
+        .addOnSuccessListener { barcodes ->
+          val value = barcodes.firstOrNull()?.rawValue
+          if (value != null && value.isNotBlank()) {
+            vibrate()
+            runOnUiThread { finishWithResult(value) }
+          }
+        }
+        .addOnCompleteListener { proxy.close() }
+    } catch (e: Exception) {
+      proxy.close()
+    }
   }
 
   private fun vibrate() {

@@ -564,12 +564,8 @@ export function SellScreen() {
     [cart, perms.maxDiscountPct],
   );
 
-  const completeSale = useCallback(
+  const completeSaleInner = useCallback(
     async (paymentType: 'cash' | 'debt', customerId?: number) => {
-      if (cart.lines.length === 0) {
-        return;
-      }
-      setBusy(true);
       const createdAt = localTimestamp();
       const clientRef = newClientRef(deviceId || 'dev');
       const lines = cart.lines.map(line => ({
@@ -614,21 +610,22 @@ export function SellScreen() {
           );
           return;
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : 'فشل البيع';
-          // أخطاء صلاحيات/مخزون حقيقية من الخادم → لا تسجيل محلي.
-          if (
+          const status =
             error != null &&
             typeof error === 'object' &&
             'status' in error &&
-            typeof (error as {status?: number}).status === 'number' &&
-            (error as {status: number}).status > 0 &&
-            (error as {status: number}).status !== 0
-          ) {
-            toast(message, 'error');
+            typeof (error as {status?: number}).status === 'number'
+              ? (error as {status: number}).status
+              : 0;
+          // أخطاء صلاحيات/مخزون حقيقية من الخادم → لا تسجيل محلي.
+          if (status >= 400) {
+            toast(
+              error instanceof Error ? error.message : 'فشل البيع',
+              'error',
+            );
             return;
           }
-          // الشبكة انقطعت → نكمل محلياً (المسار الأهم للتاجر).
+          // الشبكة انقطعت (status 0) → نكمل محلياً (المسار الأهم).
           toast('لا اتصال — سُجِّلت الفاتورة محلياً وتزامن تلقائياً', 'info');
         }
       }
@@ -679,21 +676,26 @@ export function SellScreen() {
           error instanceof Error ? error.message : 'تعذر تسجيل الفاتورة محلياً',
           'error',
         );
-      } finally {
-        setBusy(false);
       }
     },
     [cart, deviceId, online, perms.maxDiscountPct, refreshCatalog, toast],
   );
 
-  // تصفير busy عند نهاية المسار المتصل أيضاً.
-  useEffect(() => {
-    if (!busy) {
-      return;
-    }
-    const t = setTimeout(() => setBusy(false), 1);
-    return () => clearTimeout(t);
-  }, [busy]);
+  const completeSale = useCallback(
+    async (paymentType: 'cash' | 'debt', customerId?: number) => {
+      if (cart.lines.length === 0) {
+        return;
+      }
+      setBusy(true);
+      try {
+        await completeSaleInner(paymentType, customerId);
+      } finally {
+        setBusy(false);
+      }
+    },
+    [completeSaleInner],
+  );
+
 
   return (
     <View style={styles.screen}>
