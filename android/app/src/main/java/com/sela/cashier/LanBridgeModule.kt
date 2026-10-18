@@ -1,15 +1,19 @@
 package com.sela.cashier
 
 import android.annotation.SuppressLint
+import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.provider.Settings
 import com.facebook.react.bridge.Arguments
+import com.facebook.react.bridge.BaseActivityEventListener
 import com.facebook.react.bridge.Promise
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
 import com.facebook.react.bridge.WritableArray
+import org.json.JSONArray
 import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
@@ -39,6 +43,7 @@ class LanBridgeModule(reactContext: ReactApplicationContext) :
     const val NAME = "LanBridge"
     const val DISCOVERY_PORT = 8951
     const val DISCOVERY_MAGIC = "SELA_POS_DISCOVER_v1"
+    const val QR_REQUEST_CODE = 7321
   }
 
   override fun getName(): String = NAME
@@ -179,4 +184,149 @@ class LanBridgeModule(reactContext: ReactApplicationContext) :
     prefs.edit().remove(key).apply()
     promise.resolve(true)
   }
+
+  // ── v2.0: قاعدة بيانات محلية SQLite (العمل دون اتصال) ──────────
+  // أرشيف فواتير الكاشير + طابور المزامنة + كتالوج المخزون المؤقت.
+  // واجهة SQL عامة صغيرة (استعلام/تنفيذ بمعاملات JSON) — منطق
+  // الجداول كله في TS حيث يسهل تطويره واختباره.
+
+  private val storeDb by lazy {
+    com.sela.cashier.LocalStoreDbHelper(reactApplicationContext)
+  }
+
+  /** استعلام SELECT → مصفوفة صفوف (كل صف خريطة عمود/قيمة). */
+  @ReactMethod
+  fun dbQuery(sql: String, paramsJson: String, promise: Promise) {
+    try {
+      val params = JSONArray(paramsJson)
+      val db = storeDb.readableDatabase
+      val cursor = db.rawQuery(sql, Array(params.length()) { i ->
+        if (params.isNull(i)) null else params.get(i).toString()
+      })
+      val rows = Arguments.createArray()
+      while (cursor.moveToNext()) {
+        val row = Arguments.createMap()
+        for (col in 0 until cursor.columnCount) {
+          when (cursor.getType(col)) {
+            android.database.Cursor.FIELD_TYPE_NULL -> row.putNull(cursor.getColumnName(col))
+            android.database.Cursor.FIELD_TYPE_INTEGER ->
+              row.putDouble(cursor.getColumnName(col), cursor.getLong(col).toDouble())
+            android.database.Cursor.FIELD_TYPE_FLOAT ->
+              row.putDouble(cursor.getColumnName(col), cursor.getDouble(col))
+            else -> row.putString(cursor.getColumnName(col), cursor.getString(col))
+          }
+        }
+        rows.pushMap(row)
+      }
+      cursor.close()
+      promise.resolve(rows)
+    } catch (e: Exception) {
+      promise.reject("DB_QUERY", e.message, e)
+    }
+  }
+
+  /** تنفيذ INSERT/UPDATE/DELETE/DDL → {insertId, rowsAffected}. */
+  @ReactMethod
+  fun dbExecute(sql: String, paramsJson: String, promise: Promise) {
+    try {
+      val params = JSONArray(paramsJson)
+      val db = storeDb.writableDatabase
+      db.execSQL(sql, Array(params.length()) { i ->
+        if (params.isNull(i)) null else params.get(i).toString()
+      })
+      // execSQL لا يعيد شيئاً — نقرأ last_insert_rowid من نفس الاتصال.
+      val cursor = db.rawQuery("SELECT last_insert_rowid() AS id, changes() AS ch", null)
+      var insertId = -1.0
+      var changed = 0.0
+      if (cursor.moveToFirst()) {
+        insertId = cursor.getDouble(0)
+        changed = cursor.getDouble(1)
+      }
+      cursor.close()
+      val out = Arguments.createMap().apply {
+        putDouble("insertId", insertId)
+        putDouble("rowsAffected", changed)
+      }
+      promise.resolve(out)
+    } catch (e: Exception) {
+      promise.reject("DB_EXEC", e.message, e)
+    }
+  }
+
+  /** معاملة ذرية لعدة عبارات SQL: paramsJson = [[..], [..]] */
+  @ReactMethod
+  fun dbTransaction(statementsJson: String, promise: Promise) {
+    try {
+      val statements = JSONArray(statementsJson)
+      val db = storeDb.writableDatabase
+      db.beginTransaction()
+      try {
+        for (i in 0 until statements.length()) {
+          val entry = statements.getJSONObject(i)
+          val sql = entry.getString("sql")
+          val params = entry.optJSONArray("params") ?: JSONArray()
+          db.execSQL(sql, Array(params.length()) { j ->
+            if (params.isNull(j)) null else params.get(j).toString()
+          })
+        }
+        db.setTransactionSuccessful()
+        promise.resolve(true)
+      } finally {
+        db.endTransaction()
+      }
+    } catch (e: Exception) {
+      promise.reject("DB_TX", e.message, e)
+    }
+  }
+
+  // ── v2.0: مسح باركود الاتصال (QR) ──────────────────────────────
+
+  private var qrPromise: Promise? = null
+  private val activityEventListener = object : BaseActivityEventListener() {
+    override fun onActivityResult(
+      activity: Activity?,
+      requestCode: Int,
+      resultCode: Int,
+      data: Intent?,
+    ) {
+      if (requestCode != QR_REQUEST_CODE) {
+        return
+      }
+      val promise = qrPromise ?: return
+      qrPromise = null
+      if (resultCode == Activity.RESULT_OK) {
+        val value = data?.getStringExtra(QrScanActivity.EXTRA_RESULT)
+        if (!value.isNullOrBlank()) {
+          promise.resolve(value)
+          return
+        }
+      }
+      promise.reject("QR_CANCELLED", "أُلغي المسح")
+    }
+  }
+
+  init {
+    reactApplicationContext.addActivityEventListener(activityEventListener)
+  }
+
+  /** فتح نافذة مسح QR الأصلية — يعيد نص البطاقة أو يرفض عند الإلغاء. */
+  @ReactMethod
+  fun scanQr(promise: Promise) {
+    val currentActivity = currentActivity
+    if (currentActivity == null) {
+      promise.reject("NO_ACTIVITY", "لا توجد نافذة نشطة")
+      return
+    }
+    qrPromise = promise
+    try {
+      currentActivity.startActivityForResult(
+        Intent(currentActivity, QrScanActivity::class.java),
+        QR_REQUEST_CODE,
+      )
+    } catch (e: Exception) {
+      qrPromise = null
+      promise.reject("QR_FAILED", e.message, e)
+    }
+  }
+
 }

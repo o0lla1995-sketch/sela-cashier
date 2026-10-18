@@ -1,9 +1,14 @@
 /**
- * api/client.ts — عميل بروتوكول نقطة البيع سيلا عبر الشبكة المحلية.
+ * api/client.ts — v2.0: عميل بروتوكول نقطة البيع سيلا.
  * ─────────────────────────────────────────────────────────────────
  * كل الطلبات JSON عبر HTTP إلى خادم نقطة البيع (Android/سطح المكتب)
- * مع رمز الجلسة (Bearer). المهلة 12 ثانية؛ الأخطاء العربية تصل
- * نصاً جاهزاً للعرض من الخادم نفسه.
+ * مع رمز الجلسة (Bearer). v2.0:
+ *  • login يعيد صلاحيات الكاشير (perms) — الخادم يفرضها أيضاً.
+ *  • sale/return يحملان clientRef فريداً لكل عملية (ميزة الخدمة عند
+ *    المزامنة بعد انقطاع) وcreatedAt زمن البيع الفعلي.
+ *  • syncPush: دفعة عمليات دون اتصال بنتائج مستقلة لكل عملية.
+ *  • productImage: صورة المنتج (base64) للبطاقات المرئية.
+ *  • invoices تدعم since (زيادة cursor) لتحديث الأرشيف المحلي.
  */
 import type {
   CashierInvoice,
@@ -12,6 +17,7 @@ import type {
   LocalCustomer,
   LoginResult,
   StatsPayload,
+  SyncOpResult,
 } from './types';
 
 const TIMEOUT_MS = 12000;
@@ -47,13 +53,17 @@ async function request<T>(
     query?: Record<string, string>;
     body?: unknown;
     auth?: boolean;
+    timeoutMs?: number;
   },
 ): Promise<T> {
   if (!baseUrl) {
     throw new ApiError('لا يوجد اتصال بنقطة البيع — سجّل الدخول أولاً', 0);
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const timer = setTimeout(
+    () => controller.abort(),
+    options?.timeoutMs ?? TIMEOUT_MS,
+  );
   let url = `${baseUrl}${path}`;
   if (options?.query) {
     const params = new URLSearchParams(options.query).toString();
@@ -94,10 +104,7 @@ async function request<T>(
     if (error instanceof ApiError) {
       throw error;
     }
-    throw new ApiError(
-      'تعذر الوصول لنقطة البيع — تأكد أن التطبيق مفتوح وأنكما على نفس شبكة Wi-Fi',
-      0,
-    );
+    throw new ApiError('تعذر الوصول لنقطة البيع — تحقق من الشبكة', 0);
   } finally {
     clearTimeout(timer);
   }
@@ -110,10 +117,17 @@ export interface LoginInput {
   deviceLabel: string;
 }
 
+export interface SaleLineInput {
+  productId: number;
+  unitId?: number | null;
+  variantId?: number | null;
+  quantity: number;
+}
+
 export const CashierApi = {
   /** نبض الخادم — يعيد اسم المتجر أو يرمي. */
   ping(): Promise<{ok: boolean; store: string; version: string}> {
-    return request('GET', '/api/ping', {auth: false});
+    return request('GET', '/api/ping', {auth: false, timeoutMs: 5000});
   },
 
   async login(input: LoginInput): Promise<LoginResult> {
@@ -126,6 +140,7 @@ export const CashierApi = {
       token: payload.token,
       cashier: payload.cashier,
       store: payload.store,
+      perms: payload.perms,
     };
   },
 
@@ -154,20 +169,30 @@ export const CashierApi = {
     }
   },
 
+  /** v2.0: صورة المنتج (JPEG base64) — للبطاقات المرئية. */
+  productImage(id: number): Promise<{image: string}> {
+    return request('GET', '/api/product-image', {
+      query: {id: String(id)},
+      timeoutMs: 15000,
+    });
+  },
+
   customers(): Promise<{customers: LocalCustomer[]}> {
     return request('GET', '/api/customers');
   },
 
-  async sale(input: {
-    lines: {
-      productId: number;
-      unitId?: number | null;
-      quantity: number;
-    }[];
+  sale(input: {
+    lines: SaleLineInput[];
     discount?: number;
     paymentType: 'cash' | 'debt';
     localCustomerId?: number;
+    /** v2.0: مرجع فريد من هذا الجهاز (ميزة المزامنة). */
+    clientRef?: string;
+    /** v2.0: زمن البيع الفعلي عند الكاشير YYYY-MM-DD HH:mm:ss. */
+    createdAt?: string;
   }): Promise<{
+    ok: boolean;
+    duplicate?: boolean;
     invoice: {
       id: number;
       number: string;
@@ -180,25 +205,34 @@ export const CashierApi = {
     return request('POST', '/api/sale', {body: input});
   },
 
-  invoices(limit = 40): Promise<{invoices: CashierInvoice[]}> {
-    return request('GET', '/api/invoices', {query: {limit: String(limit)}});
+  invoices(
+    limit = 40,
+    since = 0,
+  ): Promise<{invoices: CashierInvoice[]}> {
+    const query: Record<string, string> = {limit: String(limit)};
+    if (since > 0) {
+      query.since = String(since);
+    }
+    return request('GET', '/api/invoices', {query});
   },
 
   invoice(id: number): Promise<InvoiceDetail> {
     return request('GET', '/api/invoice', {query: {id: String(id)}});
   },
 
-  async return(input: {
-    saleId: number;
+  return(input: {
+    saleId?: number;
+    /** v2.0: مرجع الفاتورة الأصلية إن أُجريت دون اتصال. */
+    saleClientRef?: string;
     lines: {saleItemId: number; quantity: number}[];
-    exchange?: {
-      productId: number;
-      unitId?: number | null;
-      quantity: number;
-    }[];
+    exchange?: SaleLineInput[];
     refundMethod?: 'cash' | 'none';
     note?: string;
+    clientRef?: string;
+    createdAt?: string;
   }): Promise<{
+    ok: boolean;
+    duplicate?: boolean;
     return: {
       id: number;
       number: string;
@@ -213,4 +247,43 @@ export const CashierApi = {
   stats(): Promise<StatsPayload> {
     return request('GET', '/api/stats');
   },
+
+  /** v2.0: دفعة مزامنة عمليات دون اتصال — نتيجة مستقلة لكل عملية. */
+  syncPush(
+    ops: {
+      opId: string;
+      kind: 'sale' | 'return';
+      payload: Record<string, unknown>;
+    }[],
+  ): Promise<{results: SyncOpResult[]}> {
+    return request('POST', '/api/sync/push', {body: {ops}});
+  },
 };
+
+let seq = 0;
+
+/**
+ * توليد مرجع عملية فريد من هذا الجهاز — deviceId + الوقت + تسلسل.
+ * به تمنع نقطة البيع أي ازدواج عند إعادة إرسال دفعة انقطعت، وبما أن
+ * الأرقام الحقيقية تُمنح من نقطة البيع وحدها فلا تعارض بين حسابات
+ * الكاشيرين أبداً (أهم نقطة طلبها التاجر).
+ */
+export function newClientRef(deviceId: string): string {
+  seq += 1;
+  const now = new Date();
+  const stamp = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(
+    now.getDate(),
+  ).padStart(2, '0')}${String(now.getHours()).padStart(2, '0')}${String(
+    now.getMinutes(),
+  ).padStart(2, '0')}${String(now.getSeconds()).padStart(2, '0')}`;
+  return `C-${deviceId}-${stamp}-${seq}-${Math.floor(Math.random() * 1000)}`;
+}
+
+/** التوقيت المحلي بصيغة قاعدة البيانات YYYY-MM-DD HH:mm:ss. */
+export function localTimestamp(): string {
+  const now = new Date();
+  const pad = (v: number) => String(v).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
+    now.getDate(),
+  )} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`;
+}

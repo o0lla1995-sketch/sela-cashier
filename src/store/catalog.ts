@@ -1,15 +1,27 @@
 /**
- * store/catalog.ts — كتالوج منتجات المخزون (نسخة محلية مؤقتة تُجلب
- * من نقطة البيع) + سلة البيع الحية.
+ * store/catalog.ts — v2.0: الكتالوج + السلة + ذاكرة الصور.
+ * ─────────────────────────────────────────────────────────────────
+ *  • الكتالوج يُجلب من نقطة البيع ويُخزَّن محلياً (kv) — فالبيع
+ *    يستمر حتى بانقطاع الاتصال بأسعار وتسعير مطابقين لمعادلة
+ *    الخادم حرفياً (نفس خصم المنتج، نفس أسعار الوحدات والمتغيرات).
+ *  • السلة تدعم الوحدات والمتغيرات (لون×مقاس/حجم) والوزن — إصلاح
+ *    «خطأ منتج متغيرات» الذي كان يمنع بيع الملابس والأحذية.
+ *  • صور المنتجات تُجلب كسولاً (productImage) وتُخزَّن في الذاكرة
+ *    + على القرص — لا تُطلب مرتين أبداً.
  */
 import {create} from 'zustand';
 import {CashierApi} from '../api/client';
-import type {CatalogProduct} from '../api/types';
+import type {CatalogProduct, CatalogVariant} from '../api/types';
+import {cacheCatalog, loadCachedCatalog} from './offline';
+import {LanBridge, localDb} from '../native';
 
 interface CatalogState {
   products: CatalogProduct[];
   loading: boolean;
   lastFetchAt: number;
+  fromCache: boolean;
+  /** يبدأ من النسخة المخزنة (فوري) ثم يجلب تحديثاً إن توفر الاتصال. */
+  hydrate: () => Promise<void>;
   refresh: () => Promise<void>;
 }
 
@@ -17,6 +29,19 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
   products: [],
   loading: false,
   lastFetchAt: 0,
+  fromCache: false,
+
+  async hydrate() {
+    if (get().lastFetchAt > 0) {
+      return;
+    }
+    const cached = await loadCachedCatalog();
+    if (cached.length > 0) {
+      set({products: cached, fromCache: true, lastFetchAt: -1});
+    }
+    await get().refresh();
+  },
+
   async refresh() {
     if (get().loading) {
       return;
@@ -24,26 +49,107 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
     set({loading: true});
     try {
       const payload = await CashierApi.catalog();
-      set({products: payload.products ?? [], lastFetchAt: Date.now()});
+      const products = payload.products ?? [];
+      set({products, lastFetchAt: Date.now(), fromCache: false});
+      await cacheCatalog(products);
+    } catch {
+      // فشل الجلب — النسخة المخزنة (إن وجدت) تبقى شغالة.
+      if (get().lastFetchAt === 0) {
+        const cached = await loadCachedCatalog();
+        if (cached.length > 0) {
+          set({products: cached, fromCache: true, lastFetchAt: -1});
+        }
+      }
     } finally {
       set({loading: false});
     }
   },
 }));
 
-/** سطر في سلة الكاشير — السعر محسوب من الكتالوج محلياً للعرض،
- *  والخادم يعيد التسعير الحقيقي عند إتمام البيع (مصدر الحقيقة). */
-export interface CartLine {
-  key: string;
-  product: CatalogProduct;
-  unitId: number | null;
-  unitName: string;
-  conversion: number;
-  unitPrice: number;
-  quantity: number;
+// ── ذاكرة الصور (الذاكرة + القرص) ────────────────────────────────
+const memoryImages = new Map<number, string>();
+
+/** حفظ صورة على القرص (filesDir/imgcache) — أفضل جهد. */
+async function persistImage(productId: number, base64: string): Promise<void> {
+  try {
+    await localRun(
+      'INSERT OR REPLACE INTO image_cache (product_id, base64, saved_at) VALUES (?, ?, ?)',
+      [productId, base64, Date.now()],
+    );
+  } catch {
+    // الأقراص لا تعطل البيع أبداً.
+  }
 }
 
-function linePrice(product: CatalogProduct, unitId: number | null): number {
+// جدول ذاكرة الصور داخل القاعدة المحلية (يُنشأ كسولاً).
+let imageTableReady = false;
+async function ensureImageTable(): Promise<void> {
+  if (imageTableReady) {
+    return;
+  }
+  await localDb.run(
+    `CREATE TABLE IF NOT EXISTS image_cache (
+      product_id INTEGER PRIMARY KEY,
+      base64 TEXT NOT NULL,
+      saved_at INTEGER NOT NULL
+    )`,
+    [],
+  );
+  imageTableReady = true;
+}
+
+async function localRun(sql: string, params: unknown[]): Promise<void> {
+  await ensureImageTable();
+  await localDb.run(sql, params);
+}
+
+async function localSelect(
+  sql: string,
+  params: unknown[],
+): Promise<Record<string, string | number | null>[]> {
+  await ensureImageTable();
+  return localDb.select(sql, params);
+}
+
+export const imageStore = {
+  /** جلب صورة منتج: الذاكرة ← القرص ← الخادم (مرة واحدة فقط). */
+  async get(productId: number): Promise<string | null> {
+    const hit = memoryImages.get(productId);
+    if (hit != null) {
+      return hit;
+    }
+    try {
+      const rows = await localSelect(
+        'SELECT base64 FROM image_cache WHERE product_id = ?',
+        [productId],
+      );
+      if (rows.length > 0 && rows[0].base64) {
+        const base64 = String(rows[0].base64);
+        memoryImages.set(productId, base64);
+        return base64;
+      }
+    } catch {
+      // تجاهل — نحاول الخادم.
+    }
+    try {
+      const payload = await CashierApi.productImage(productId);
+      if (payload?.image) {
+        memoryImages.set(productId, payload.image);
+        await persistImage(productId, payload.image);
+        return payload.image;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  },
+};
+
+// ── التسعير (نفس معادلة الخادم حرفياً) ───────────────────────────
+export function linePrice(
+  product: CatalogProduct,
+  unitId: number | null,
+): number {
   const unit =
     unitId != null ? product.units.find(u => u.id === unitId) : undefined;
   const raw = unit
@@ -53,6 +159,66 @@ function linePrice(product: CatalogProduct, unitId: number | null): number {
   return pct > 0 ? Math.round(raw * (1 - pct / 100) * 100) / 100 : raw;
 }
 
+/** سعر متغير — نفس toVariantLine/toSizedLine في نقطة البيع. */
+export function variantPrice(
+  product: CatalogProduct,
+  variant: CatalogVariant,
+): number {
+  const isSize = variant.kind === 'size';
+  const raw = isSize
+    ? variant.retailPrice ?? product.retailPrice
+    : product.retailPrice;
+  const pct = Math.max(0, Math.min(95, product.discountPct || 0));
+  return pct > 0 ? Math.round(raw * (1 - pct / 100) * 100) / 100 : raw;
+}
+
+/** وصف المتغير للعرض («أسود · L» أو الحجم). */
+export function variantLabel(variant: CatalogVariant): string {
+  return variant.kind === 'size'
+    ? variant.size
+    : variant.color
+    ? `${variant.color} · ${variant.size}`
+    : variant.size;
+}
+
+/** المخزون المتاح لسطر (وحدة/متغير/أساس) — لعرض النفاد فقط. */
+export function availableStock(
+  product: CatalogProduct,
+  unitId: number | null,
+  variantId: number | null,
+): number {
+  if (product.stockUntracked) {
+    return 999999;
+  }
+  if (variantId != null) {
+    const variant = product.variants.find(v => v.id === variantId);
+    if (variant != null) {
+      return variant.kind === 'size' ? product.stockQty : variant.stockQty;
+    }
+  }
+  if (unitId != null) {
+    const unit = product.units.find(u => u.id === unitId);
+    if (unit != null && unit.conversion > 0) {
+      return Math.max(0, product.stockQty / unit.conversion);
+    }
+  }
+  return Math.max(0, product.stockQty);
+}
+
+// ── السلة ────────────────────────────────────────────────────────
+export interface CartLine {
+  key: string;
+  product: CatalogProduct;
+  unitId: number | null;
+  unitName: string;
+  conversion: number;
+  variantId: number | null;
+  variantLabel: string | null;
+  unitPrice: number;
+  quantity: number;
+  byWeight: boolean;
+}
+
 interface CartState {
   lines: CartLine[];
   discount: number;
@@ -60,6 +226,7 @@ interface CartState {
     product: CatalogProduct,
     unitId: number | null,
     quantity: number,
+    variantId?: number | null,
   ) => void;
   setQuantity: (key: string, quantity: number) => void;
   removeLine: (key: string) => void;
@@ -74,10 +241,14 @@ export const useCartStore = create<CartState>((set, get) => ({
   lines: [],
   discount: 0,
 
-  add(product, unitId, quantity) {
-    const key = `${product.id}-${unitId ?? ''}`;
+  add(product, unitId, quantity, variantId = null) {
+    const key = `${product.id}-${unitId ?? ''}-v${variantId ?? ''}`;
     const unit =
       unitId != null ? product.units.find(u => u.id === unitId) : undefined;
+    const variant =
+      variantId != null
+        ? product.variants.find(v => v.id === variantId)
+        : undefined;
     const existing = get().lines.find(line => line.key === key);
     if (existing) {
       set({
@@ -89,6 +260,7 @@ export const useCartStore = create<CartState>((set, get) => ({
       });
       return;
     }
+    const price = variant ? variantPrice(product, variant) : linePrice(product, unitId);
     set({
       lines: [
         ...get().lines,
@@ -96,10 +268,13 @@ export const useCartStore = create<CartState>((set, get) => ({
           key,
           product,
           unitId,
-          unitName: unit ? unit.name : 'حبة',
-          conversion: unit ? unit.conversion : 1,
-          unitPrice: linePrice(product, unitId),
+          unitName: variant ? 'قطعة' : unit ? unit.name : 'حبة',
+          conversion: variant ? 1 : unit ? unit.conversion : 1,
+          variantId,
+          variantLabel: variant ? variantLabelOf(variant) : null,
+          unitPrice: price,
           quantity,
+          byWeight: product.byWeight && !unit && !variant,
         },
       ],
     });
@@ -145,3 +320,14 @@ export const useCartStore = create<CartState>((set, get) => ({
     return get().lines.length;
   },
 }));
+
+function variantLabelOf(variant: CatalogVariant): string {
+  return variantLabel(variant);
+}
+
+/** تفريغ أي مرجع قديم عند تسجيل الخروج. */
+export function resetImageMemory(): void {
+  memoryImages.clear();
+}
+
+export {LanBridge};

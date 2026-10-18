@@ -1,144 +1,242 @@
 /**
- * screens/MeScreen.tsx — حسابي: الكاشير والمتجر والاتصال والخروج.
+ * screens/MeScreen.tsx — v2.0: حسابي — بصلاحياتي وحالة اتصالي.
+ * ─────────────────────────────────────────────────────────────────
+ * ① بطاقة الحساب: اسمي، متجري، صلاحياتي كما منحها المسؤول (سقف
+ *    الخصم، الدين، المرتجعات) — أوضح ما يكون.
+ * ② حالة الاتصال بنقطة البيع + العمليات المعلقة + مزامنة فورية.
+ * ③ الوضع النهاري/الليلي/تلقائي — نفس نظام نقطة البيع (طلب التاجر).
+ * ④ تسجيل الخروج (يبقى الأرشيف المحلي — يُربط بحسابك عند الدخول).
  */
 import React from 'react';
-import {Alert, ScrollView, StyleSheet, Text, View} from 'react-native';
-import {BigButton, Chip} from '../ui';
-import {fonts, palette, spacing, typography} from '../theme';
+import {ScrollView, Text, View} from 'react-native';
+import {
+  AppButton,
+  Badge,
+  Card,
+  SectionTitle,
+  SwitchRow,
+} from '../ui';
+import {Icon} from '../Icon';
+import {
+  fonts,
+  makeStyles,
+  spacing,
+  typography,
+  useThemeStore,
+  useThemeColors,
+  type ThemeMode,
+} from '../theme';
 import {useSessionStore} from '../store/session';
+import {useSyncStore} from '../store/sync';
+import {initOfflineStore, listInvoices} from '../store/offline';
+import {useEffect, useState} from 'react';
 
 export function MeScreen() {
-  const session = useSessionStore();
-  const host = session.host ?? '';
-  const port = session.port;
+  const c = useThemeColors();
+  const styles = useStyles();
+  const cashierName = useSessionStore(s => s.cashierName);
+  const storeName = useSessionStore(s => s.storeName);
+  const perms = useSessionStore(s => s.perms);
+  const signOut = useSessionStore(s => s.signOut);
+  const online = useSyncStore(s => s.online);
+  const pending = useSyncStore(s => s.pending);
+  const lastSyncAt = useSyncStore(s => s.lastSyncAt);
+  const runCycle = useSyncStore(s => s.runCycle);
+  const themeMode = useThemeStore(s => s.mode);
+  const setThemeMode = useThemeStore(s => s.setMode);
+  const [archiveCount, setArchiveCount] = useState(0);
 
-  const signOut = () => {
-    Alert.alert(
-      'تسجيل الخروج',
-      'الخروج يمسح الجلسة من هذا الجهاز — الدخول القادم لا يحتاج موافقة جديدة (جهازك موافق عليه).',
-      [
-        {text: 'إلغاء', style: 'cancel'},
-        {text: 'خروج', style: 'destructive', onPress: () => void session.signOut()},
-      ],
-    );
-  };
+  useEffect(() => {
+    void (async () => {
+      await initOfflineStore();
+      const list = await listInvoices(1000);
+      setArchiveCount(list.length);
+    })();
+  }, []);
 
   return (
     <ScrollView
       style={styles.screen}
-      contentContainerStyle={styles.content}>
-      <View style={styles.card}>
+      contentContainerStyle={{padding: spacing.lg, gap: spacing.md}}>
+      {/* الحساب */}
+      <Card style={styles.accountCard}>
         <View style={styles.avatar}>
           <Text style={styles.avatarText}>
-            {(session.cashierName || 'ك').slice(0, 1)}
+            {(cashierName || 'ك').trim().charAt(0)}
           </Text>
         </View>
-        <Text style={styles.name}>{session.cashierName || 'كاشير'}</Text>
-        <Chip label={`متجر: ${session.storeName || '—'}`} tone="accent" />
-      </View>
+        <View style={{flex: 1, minWidth: 0}}>
+          <Text style={styles.name} numberOfLines={1}>
+            {cashierName || 'كاشير'}
+          </Text>
+          <Text style={styles.dim} numberOfLines={1}>
+            {storeName || 'متجر سيلا'}
+          </Text>
+        </View>
+        <Badge
+          label={online ? 'متصل بنقطة البيع' : 'دون اتصال — وضع محلي'}
+          tone={online ? 'success' : 'warning'}
+        />
+      </Card>
 
-      <View style={styles.card}>
-        <Row label="نقطة البيع" value={`${host}:${port}`} />
-        <Row label="الجهاز" value={session.deviceLabel || '—'} />
-        <Row label="التطبيق" value="سيلّا كاشير 1.0.0" />
-      </View>
+      {/* الصلاحيات */}
+      <SectionTitle
+        title="صلاحياتي"
+        hint="يمنحها المسؤول من شاشة الكاشير في نقطة البيع"
+      />
+      <Card style={{gap: 6}}>
+        <View style={styles.permRow}>
+          <Icon name="percent" size={16} color={c.accent} />
+          <Text style={styles.permLabel}>أقصى خصم</Text>
+          <View style={{flex: 1}} />
+          <Text style={styles.permValue}>{perms.maxDiscountPct}%</Text>
+        </View>
+        <View style={styles.permRow}>
+          <Icon name="book" size={16} color={perms.canDebt ? c.success : c.danger} />
+          <Text style={styles.permLabel}>البيع بالدين</Text>
+          <View style={{flex: 1}} />
+          <Badge
+            label={perms.canDebt ? 'مسموح' : 'مقفول'}
+            tone={perms.canDebt ? 'success' : 'danger'}
+          />
+        </View>
+        <View style={styles.permRow}>
+          <Icon name="undo" size={16} color={perms.canReturn ? c.success : c.danger} />
+          <Text style={styles.permLabel}>المرتجعات والاستبدال</Text>
+          <View style={{flex: 1}} />
+          <Badge
+            label={perms.canReturn ? 'مسموح' : 'مقفول'}
+            tone={perms.canReturn ? 'success' : 'danger'}
+          />
+        </View>
+      </Card>
 
-      <View style={styles.hintCard}>
-        <Text style={styles.hintTitle}>كيف يعمل التطبيق؟</Text>
-        <Text style={styles.hintText}>
-          كل عملية بيع أو إرجاع أو استبدال تُنفَّذ داخل تطبيق سيلا في نقطة
-          البيع نفسها — الخزينة والديون والمخزون والتقارير تتحدث لحظياً
-          هناك باسمك، وتقاريرك هنا تخص فواتيرك أنت فقط. أبقِ تطبيق نقطة
-          البيع مفتوحاً أثناء عملك.
+      {/* المزامنة */}
+      <SectionTitle title="المزامنة" hint="أرشيفك محفوظ على جهازك دائماً" />
+      <Card style={{gap: 8}}>
+        <View style={styles.permRow}>
+          <Icon name="sync" size={16} color={pending > 0 ? c.warning : c.success} />
+          <Text style={styles.permLabel}>عمليات بانتظار المزامنة</Text>
+          <View style={{flex: 1}} />
+          <Text style={styles.permValue}>{pending}</Text>
+        </View>
+        <View style={styles.permRow}>
+          <Icon name="receipt" size={16} color={c.info} />
+          <Text style={styles.permLabel}>فواتيري في الأرشيف</Text>
+          <View style={{flex: 1}} />
+          <Text style={styles.permValue}>{archiveCount}</Text>
+        </View>
+        {lastSyncAt ? (
+          <Text style={styles.dim}>آخر مزامنة: {lastSyncAt.slice(0, 16)}</Text>
+        ) : null}
+        <AppButton
+          title="مزامنة الآن"
+          icon="sync"
+          variant="secondary"
+          small
+          onPress={() => void runCycle({force: true})}
+        />
+        <Text style={styles.dim}>
+          البيع يعمل كاملاً حتى بانقطاع الاتصال: كل عملية تُسجَّل على
+          جهازك برقم مؤقت، وتصدر أرقامها الرسمية من نقطة البيع عند
+          المزامنة — فلا تعارض بين حسابات الكاشيرين إطلاقاً.
         </Text>
-      </View>
+      </Card>
 
-      <BigButton title="تسجيل الخروج" variant="danger" onPress={signOut} />
+      {/* المظهر */}
+      <SectionTitle title="المظهر" hint="نفس أوضاع نقطة البيع" />
+      <Card>
+        <View style={{gap: 2}}>
+          {(
+            [
+              {mode: 'light', label: 'الوضع النهاري', icon: 'sun'},
+              {mode: 'dark', label: 'الوضع الليلي', icon: 'moon'},
+              {mode: 'system', label: 'تلقائي (حسب النظام)', icon: 'settings'},
+            ] as {mode: ThemeMode; label: string; icon: 'sun' | 'moon' | 'settings'}[]
+          ).map(item => (
+            <SwitchRow
+              key={item.mode}
+              label={item.label}
+              icon={item.icon}
+              value={themeMode === item.mode}
+              onValueChange={on => {
+                if (on) {
+                  setThemeMode(item.mode);
+                }
+              }}
+            />
+          ))}
+        </View>
+      </Card>
+
+      <AppButton
+        title="تسجيل الخروج"
+        icon="logout"
+        variant="danger"
+        onPress={() => void signOut()}
+      />
+      <Text style={styles.version}>سيلّا كاشير · الإصدار 2.0.0 (2)</Text>
     </ScrollView>
   );
 }
 
-function Row({label, value}: {label: string; value: string}) {
-  return (
-    <View style={styles.row}>
-      <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={styles.rowValue} numberOfLines={1}>
-        {value}
-      </Text>
-    </View>
-  );
-}
-
-const styles = StyleSheet.create({
-  screen: {flex: 1, backgroundColor: palette.bg},
-  content: {
-    padding: spacing.lg,
-    gap: spacing.md,
-    maxWidth: 560,
-    width: '100%',
-    alignSelf: 'center',
-    paddingBottom: spacing.xl + spacing.xl,
-  },
-  card: {
-    backgroundColor: palette.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.lg,
-    gap: spacing.sm,
-    alignItems: 'center',
-  },
-  avatar: {
-    width: 70,
-    height: 70,
-    borderRadius: 22,
-    backgroundColor: palette.accentSoft,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  avatarText: {color: palette.accent, fontFamily: fonts.black, fontSize: 30},
-  name: {
-    color: palette.text,
-    fontFamily: fonts.black,
-    fontSize: typography.title,
-  },
-  row: {
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.sm,
-    alignSelf: 'stretch',
-  },
-  rowLabel: {
-    color: palette.textDim,
-    fontFamily: fonts.medium,
-    fontSize: typography.small,
-  },
-  rowValue: {
-    flex: 1,
-    color: palette.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.small + 1,
-    textAlign: 'left',
-  },
-  hintCard: {
-    backgroundColor: palette.surface,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.lg,
-    gap: 6,
-  },
-  hintTitle: {
-    color: palette.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-    textAlign: 'right',
-  },
-  hintText: {
-    color: palette.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    textAlign: 'right',
-    lineHeight: 20,
-  },
-});
+const useStyles = makeStyles(c =>
+  ({
+    screen: {flex: 1, backgroundColor: c.bg},
+    accountCard: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: spacing.md,
+    },
+    avatar: {
+      width: 54,
+      height: 54,
+      borderRadius: 17,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    avatarText: {
+      color: c.onAccent,
+      fontFamily: fonts.black,
+      fontSize: 26,
+    },
+    name: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'right',
+    },
+    dim: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+      lineHeight: 19,
+    },
+    permRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: spacing.sm + 2,
+      paddingVertical: 4,
+    },
+    permLabel: {
+      color: c.text,
+      fontFamily: fonts.medium,
+      fontSize: typography.body,
+      textAlign: 'right',
+    },
+    permValue: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    version: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 2,
+      textAlign: 'center',
+      marginTop: spacing.sm,
+    },
+  }) as const,
+);

@@ -1,602 +1,793 @@
 /**
- * screens/InvoicesScreen.tsx — فواتير الكاشير نفسه: عرض وإرجاع
- * واستبدال.
+ * screens/InvoicesScreen.tsx — v2.0: فواتيري — أرشيف موحّد يعمل
+ * دون اتصال.
  * ─────────────────────────────────────────────────────────────────
- * ① قائمة فواتيري (بيع ومرتجعات) من نقطة البيع.
- * ② فتح فاتورة يعرض أصنافها والمتبقي القابل للإرجاع منها.
- * ③ الإرجاع: تحديد الكميات لكل صنف → استرداد نقدي من الخزينة.
- * ④ الاستبدال: تحديد بضاعة بديلة من الكتالوج — الفرق يُسوّى كما
- *    في نقطة البيع تماماً (الخادم يحسب ويكتب في نفس المعاملة).
+ * ① القائمة تُقرأ من الأرشيف المحلي (كل فواتيري من الجهازين معاً):
+ *    محلية بانتظار المزامنة (م-N) بشارة صفراء، مرفوضة بسببها
+ *    الأحمر، ومزامَنة برقمها الرسمي.
+ * ② فلترة زمنية: اليوم / 7 أيام / الكل + تمييز نقدي/دين/مرتجع.
+ * ③ التفاصيل من الأرشيف المحلي مباشرة (لا تحتاج اتصالاً).
+ * ④ الإرجاع والاستبدال: من فواتيري المتزامنة عبر الخادم (الكميات
+ *    المتبقية الحقيقية)، أو من المحلية عبر طابور المزامنة
+ *    (saleClientRef) — التحقق النهائي عند الخادم وقت المزامنة.
  */
-import React, {useCallback, useEffect, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   ActivityIndicator,
-  FlatList,
   I18nManager,
   Pressable,
-  RefreshControl,
   ScrollView,
-  StyleSheet,
   Text,
-  TextInput,
   View,
 } from 'react-native';
-import {BigButton, Chip, EmptyState, LabeledInput, Sheet, useToastStore} from '../ui';
+import {
+  AppButton,
+  Badge,
+  EmptyState,
+  Segmented,
+  Sheet,
+  useToastStore,
+} from '../ui';
+import {Icon} from '../Icon';
 import {
   fonts,
-  formatDateTime,
   formatMoney,
   formatQty,
-  palette,
+  makeStyles,
   spacing,
   typography,
+  useThemeColors,
 } from '../theme';
-import {CashierApi} from '../api/client';
-import type {
-  CashierInvoice,
-  CatalogProduct,
-  InvoiceDetail,
-} from '../api/types';
-import {useCatalogStore} from '../store/catalog';
+import {CashierApi, localTimestamp, newClientRef} from '../api/client';
+import type {InvoiceDetail} from '../api/types';
+import {
+  invoiceItems,
+  listInvoices,
+  recordLocalOp,
+  type LocalInvoice,
+} from '../store/offline';
+import {useCatalogStore, linePrice, variantPrice} from '../store/catalog';
+import {useSessionStore} from '../store/session';
+import {kickSync, useSyncStore} from '../store/sync';
+
+type Period = 'today' | 'week' | 'all';
+
+function withinPeriod(createdAt: string, period: Period): boolean {
+  if (period === 'all') {
+    return true;
+  }
+  const day = createdAt.slice(0, 10);
+  const now = new Date();
+  const pad = (v: number) => String(v).padStart(2, '0');
+  const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  if (period === 'today') {
+    return day === today;
+  }
+  const weekAgo = new Date(now.getTime() - 6 * 86400000);
+  const from = `${weekAgo.getFullYear()}-${pad(weekAgo.getMonth() + 1)}-${pad(weekAgo.getDate())}`;
+  return day >= from && day <= today;
+}
 
 export function InvoicesScreen() {
+  const c = useThemeColors();
+  const styles = useStyles();
   const toast = useToastStore(s => s.show);
+  const perms = useSessionStore(s => s.perms);
+  const deviceId = useSessionStore(s => s.deviceId);
+  const online = useSyncStore(s => s.online);
   const refreshCatalog = useCatalogStore(s => s.refresh);
-  const [invoices, setInvoices] = useState<CashierInvoice[] | null>(null);
-  const [refreshing, setRefreshing] = useState(false);
-  const [detail, setDetail] = useState<InvoiceDetail | null>(null);
-  const [detailBusy, setDetailBusy] = useState(false);
+
+  const [period, setPeriod] = useState<Period>('today');
+  const [invoices, setInvoices] = useState<LocalInvoice[] | null>(null);
+  const [openRef, setOpenRef] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      const payload = await CashierApi.invoices(50);
-      setInvoices(payload.invoices ?? []);
-    } catch (error) {
-      toast(
-        error instanceof Error ? error.message : 'تعذر جلب الفواتير',
-        'error',
-      );
-      setInvoices([]);
-    } finally {
-      setRefreshing(false);
-    }
-  }, [toast]);
+    setInvoices(await listInvoices(200));
+  }, []);
 
   useEffect(() => {
     void load();
+    const timer = setInterval(() => {
+      void load();
+    }, 5000);
+    return () => clearInterval(timer);
   }, [load]);
 
-  const openDetail = useCallback(
-    async (invoiceId: number) => {
-      setDetailBusy(true);
-      try {
-        const payload = await CashierApi.invoice(invoiceId);
-        setDetail(payload);
-      } catch (error) {
-        toast(
-          error instanceof Error ? error.message : 'تعذر فتح الفاتورة',
-          'error',
-        );
-      } finally {
-        setDetailBusy(false);
-      }
-    },
-    [toast],
-  );
+  const filtered = useMemo(() => {
+    if (!invoices) {
+      return [];
+    }
+    return invoices.filter(inv => withinPeriod(inv.createdAt, period));
+  }, [invoices, period]);
+
+  const openInvoice = filtered.find(inv => inv.ref === openRef) ?? null;
 
   return (
     <View style={styles.screen}>
-      <FlatList
-        data={invoices ?? []}
-        keyExtractor={item => String(item.id)}
-        contentContainerStyle={{gap: 8, padding: 10, paddingBottom: 20}}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={() => void load()} />
-        }
-        renderItem={({item}) => (
-          <Pressable
-            style={styles.row}
-            onPress={() => void openDetail(item.id)}>
-            <View style={styles.rowIcon}>
-              <Text style={styles.rowIconText}>
-                {item.isReturn ? '↩' : '₪'}
-              </Text>
-            </View>
-            <View style={{flex: 1}}>
-              <Text style={styles.rowNumber}>{item.number}</Text>
-              <Text style={styles.rowMeta}>
-                {formatDateTime(item.createdAt)} · {item.itemCount} صنف
-              </Text>
-            </View>
-            <View style={{alignItems: 'flex-end', gap: 4}}>
+      <View style={styles.padded}>
+        <Segmented<Period>
+          value={period}
+          onChange={setPeriod}
+          options={[
+            {value: 'today', label: 'اليوم'},
+            {value: 'week', label: '7 أيام'},
+            {value: 'all', label: 'الكل'},
+          ]}
+        />
+      </View>
+      {invoices == null ? (
+        <ActivityIndicator color={c.accent} style={{marginTop: 24}} />
+      ) : filtered.length === 0 ? (
+        <EmptyState
+          icon="receipt"
+          title="لا فواتير في هذه الفترة"
+          subtitle="كل فاتورة تُسجَّل على جهازك — حتى دون اتصال بنقطة البيع"
+        />
+      ) : (
+        <ScrollView
+          contentContainerStyle={{padding: spacing.md, gap: 8, paddingBottom: 24}}>
+          {filtered.map(invoice => (
+            <Pressable
+              key={invoice.ref}
+              style={styles.row}
+              onPress={() => setOpenRef(invoice.ref)}>
+              <View
+                style={[
+                  styles.kindChip,
+                  invoice.kind === 'return'
+                    ? {backgroundColor: c.dangerSoft}
+                    : invoice.payKind === 'debt'
+                    ? {backgroundColor: c.infoSoft}
+                    : {backgroundColor: c.successSoft},
+                ]}>
+                <Icon
+                  name={invoice.kind === 'return' ? 'undo' : 'receipt'}
+                  size={16}
+                  color={
+                    invoice.kind === 'return'
+                      ? c.danger
+                      : invoice.payKind === 'debt'
+                      ? c.info
+                      : c.success
+                  }
+                />
+              </View>
+              <View style={{flex: 1, minWidth: 0}}>
+                <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 6}}>
+                  <Text style={styles.number} numberOfLines={1}>
+                    {invoice.displayNumber}
+                  </Text>
+                  {invoice.status === 'pending' ? (
+                    <Badge label="بانتظار المزامنة" tone="warning" />
+                  ) : invoice.status === 'rejected' ? (
+                    <Badge label="مرفوضة" tone="danger" />
+                  ) : null}
+                </View>
+                <Text style={styles.dim}>
+                  {invoice.createdAt.slice(0, 16)}
+                  {invoice.kind === 'sale' && invoice.payKind === 'debt'
+                    ? ' · دين'
+                    : ''}
+                  {invoice.customerName ? ` · ${invoice.customerName}` : ''}
+                  {invoice.kind === 'return' ? ' · مرتجع' : ''}
+                </Text>
+              </View>
               <Text
                 style={[
-                  styles.rowAmount,
-                  item.isReturn ? {color: palette.warning} : null,
+                  styles.total,
+                  invoice.kind === 'return' ? {color: c.danger} : null,
                 ]}>
-                {formatMoney(item.total)}
+                {formatMoney(invoice.total)}
               </Text>
-              {item.isReturn ? (
-                <Chip label="مرتجع" tone="warning" />
-              ) : item.returnedMinor > 0 ? (
-                <Chip
-                  label={`أُرجع ${formatMoney(item.returnedMinor / 100)}`}
-                  tone="neutral"
-                />
-              ) : null}
-            </View>
-          </Pressable>
-        )}
-        ListEmptyComponent={
-          invoices == null ? (
-            <ActivityIndicator color={palette.accent} />
-          ) : (
-            <EmptyState
-              title="لا فواتير بعد"
-              message="فواتيرك من نقطة البيع تظهر هنا لحظة إتمامها"
-            />
-          )
-        }
-      />
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
 
-      {detailBusy ? (
-        <View style={styles.busyOverlay}>
-          <ActivityIndicator color={palette.accent} size="large" />
-        </View>
-      ) : null}
-
-      {detail ? (
+      {openInvoice ? (
         <InvoiceDetailSheet
-          detail={detail}
-          onClose={() => setDetail(null)}
-          onDone={() => {
-            setDetail(null);
+          invoice={openInvoice}
+          online={online}
+          canReturn={perms.canReturn}
+          deviceId={deviceId}
+          onClose={() => setOpenRef(null)}
+          onChanged={() => {
             void load();
             void refreshCatalog();
           }}
+          onToast={toast}
         />
       ) : null}
     </View>
   );
 }
 
+/** تفاصيل فاتورة من الأرشيف المحلي + الإرجاع/الاستبدال. */
 function InvoiceDetailSheet({
-  detail,
+  invoice,
+  online,
+  canReturn,
+  deviceId,
   onClose,
-  onDone,
+  onChanged,
+  onToast,
 }: {
-  detail: InvoiceDetail;
+  invoice: LocalInvoice;
+  online: boolean;
+  canReturn: boolean;
+  deviceId: string;
   onClose: () => void;
-  onDone: () => void;
+  onChanged: () => void;
+  onToast: (message: string, kind?: 'success' | 'error' | 'info') => void;
 }) {
-  const toast = useToastStore(s => s.show);
-  const [quantities, setQuantities] = useState<Record<number, string>>({});
-  const [exchangeOpen, setExchangeOpen] = useState(false);
-  const [exchange, setExchange] = useState<
-    {productId: number; unitId: number | null; name: string; qty: number}[]
+  const c = useThemeColors();
+  const styles = useDetailStyles();
+  const products = useCatalogStore(s => s.products);
+  const [items, setItems] = useState<
+    Awaited<ReturnType<typeof invoiceItems>>
   >([]);
+  const [serverDetail, setServerDetail] = useState<InvoiceDetail | null>(null);
+  const [returnMode, setReturnMode] = useState(false);
+  const [exchangeMode, setExchangeMode] = useState(false);
+  const [quantities, setQuantities] = useState<Record<number, number>>({});
+  const [exchangeProductId, setExchangeProductId] = useState<number | null>(
+    null,
+  );
   const [busy, setBusy] = useState(false);
 
-  const submit = useCallback(
-    async (mode: 'cash' | 'exchange') => {
-      const lines = detail.lines
-        .map(line => ({
-          saleItemId: line.saleItemId,
-          quantity: Number(quantities[line.saleItemId]?.replace(',', '.')) || 0,
-        }))
-        .filter(line => line.quantity > 0);
-      if (lines.length === 0 && exchange.length === 0) {
-        toast('حدد كميات للإرجاع أولاً', 'error');
-        return;
-      }
-      if (mode === 'exchange' && exchange.length === 0) {
-        toast('اختر بضاعة الاستبدال أولاً', 'error');
-        return;
-      }
-      setBusy(true);
+  const isSale = invoice.kind === 'sale';
+
+  useEffect(() => {
+    void invoiceItems(invoice.ref).then(setItems);
+  }, [invoice.ref]);
+
+  // تفاصيل الخادم (الكميات المتبقية الحقيقية) — للفواتير المتزامنة.
+  useEffect(() => {
+    setServerDetail(null);
+    if (invoice.status !== 'synced' || !online || invoice.syncedNumber == null) {
+      return;
+    }
+    void (async () => {
       try {
-        const payload = await CashierApi.return({
-          saleId: detail.sale.id,
-          lines,
-          exchange:
-            exchange.length > 0
-              ? exchange.map(item => ({
-                  productId: item.productId,
-                  unitId: item.unitId,
-                  quantity: item.qty,
-                }))
-              : undefined,
-          refundMethod: mode === 'exchange' ? 'none' : 'cash',
-        });
-        toast(
-          `تم — إشعار ${payload.return.number}${
-            payload.return.refundMinor > 0
-              ? ` · استرداد ${formatMoney(payload.return.refundMinor / 100)}`
-              : payload.return.exchangeMinor > 0
-              ? ` · استبدال ${formatMoney(payload.return.exchangeMinor / 100)}`
-              : ''
-          }`,
-          'success',
+        // البحث عن معرف الخادم عبر القائمة — نستخدم /api/invoice
+        // بمعرف الخادم: نجلب قائمة الفواتير ونجده برقمه.
+        const list = await CashierApi.invoices(100, 0);
+        const hit = (list.invoices ?? []).find(
+          inv => inv.number === invoice.syncedNumber,
         );
-        onDone();
+        if (hit) {
+          const detail = await CashierApi.invoice(hit.id);
+          setServerDetail(detail);
+        }
+      } catch {
+        // الأرشيف المحلي يكفي للعرض؛ الإرجاع يحتاج الاتصال أو الطابور.
+      }
+    })();
+  }, [invoice.ref, invoice.status, invoice.syncedNumber, online]);
+
+  const remainingFor = useCallback(
+    (index: number): number => {
+      if (serverDetail != null && items[index] != null) {
+        const line = serverDetail.lines.find(
+          l => l.productId === items[index].productId,
+        );
+        if (line) {
+          return line.remaining;
+        }
+      }
+      // محلياً: الكمية كاملة (التحقق النهائي عند الخادم).
+      return items[index]?.quantity ?? 0;
+    },
+    [items, serverDetail],
+  );
+
+  const submitReturn = useCallback(
+    async (withExchange: boolean) => {
+      if (!canReturn) {
+        onToast('المرتجعات مقفولة لحسابك — راجع المسؤول', 'error');
+        return;
+      }
+      const selected = items
+        .map((item, index) => ({item, index}))
+        .filter(({index}) => (quantities[index] ?? 0) > 0)
+        .map(({item, index}) => ({
+          saleItemId: item.id,
+          productId: item.productId,
+          quantity: quantities[index],
+        }));
+      if (selected.length === 0) {
+        onToast('حدد أصنافاً للإرجاع', 'error');
+        return;
+      }
+
+      // بناء بدائل الاستبدال من الكتالوج.
+      const exchangeLines: {
+        productId: number;
+        quantity: number;
+        unitId: number | null;
+        variantId: number | null;
+      }[] = [];
+      if (withExchange) {
+        if (exchangeProductId == null) {
+          onToast('اختر منتج الاستبدال', 'error');
+          return;
+        }
+        exchangeLines.push({
+          productId: exchangeProductId,
+          quantity: 1,
+          unitId: null,
+          variantId: null,
+        });
+      }
+
+      setBusy(true);
+      const createdAt = localTimestamp();
+      const clientRef = newClientRef(deviceId || 'dev');
+
+      // قيمة المرتجع تقريبية محلياً (للعرض والأرشيف) — الخادم يحسم.
+      const refundValue = selected.reduce((sum, s) => {
+        const item = items.find(i => i.id === s.saleItemId);
+        return sum + (item ? item.unitPrice * s.quantity : 0);
+      }, 0);
+      const exchangeValue = withExchange
+        ? (() => {
+            const product = products.find(p => p.id === exchangeProductId);
+            return product
+              ? product.hasVariants
+                ? variantPrice(product, product.variants[0])
+                : linePrice(product, null)
+              : 0;
+          })()
+        : 0;
+      const net = withExchange ? exchangeValue - refundValue : -refundValue;
+
+      // ① محاولة مباشرة (فاتورة متزامنة + اتصال).
+      if (invoice.status === 'synced' && online) {
+        try {
+          const list = await CashierApi.invoices(100, 0);
+          const hit = (list.invoices ?? []).find(
+            inv => inv.number === invoice.syncedNumber,
+          );
+          if (!hit) {
+            throw new Error('لم تُعثر الفاتورة عند الخادم');
+          }
+          await CashierApi.return({
+            saleId: hit.id,
+            lines: selected.map(s => ({
+              saleItemId: s.saleItemId,
+              quantity: s.quantity,
+            })),
+            exchange: exchangeLines.length > 0 ? exchangeLines : undefined,
+            refundMethod: withExchange ? 'none' : 'cash',
+            clientRef,
+            createdAt,
+          });
+          onToast('سُجِّل المرتجع في نقطة البيع', 'success');
+          onChanged();
+          onClose();
+          return;
+        } catch (error) {
+          onToast(
+            error instanceof Error ? error.message : 'فشل تسجيل المرتجع',
+            'error',
+          );
+          return;
+        }
+      }
+
+      // ② الطابور المحلي — يعمل حتى دون اتصال (saleClientRef يحل
+      //    الفاتورة الأصلية عند الخادم حتى لو كانت ما تزال معلقة).
+      try {
+        await recordLocalOp({
+          ref: clientRef,
+          kind: 'return',
+          displayNumber: `م-ر-${invoice.displayNumber}`,
+          payKind: withExchange ? 'exchange' : 'refund',
+          total: net,
+          discount: 0,
+          customerName: null,
+          createdAt,
+          lines: selected.map(s => {
+            const item = items.find(i => i.id === s.saleItemId);
+            return {
+              productId: s.productId,
+              name: item?.name ?? `#${s.productId}`,
+              variantId: item?.variantLabel ? -1 : null,
+              variantLabel: item?.variantLabel ?? null,
+              unitId: null,
+              unitName: item?.unitName ?? null,
+              quantity: s.quantity,
+              unitPrice: item?.unitPrice ?? 0,
+              lineTotal: (item?.unitPrice ?? 0) * s.quantity,
+            };
+          }),
+          payload: {
+            saleClientRef: invoice.ref,
+            lines: selected.map(s => ({
+              saleItemId: s.saleItemId,
+              quantity: s.quantity,
+            })),
+            exchange: exchangeLines.length > 0 ? exchangeLines : undefined,
+            refundMethod: withExchange ? 'none' : 'cash',
+            clientRef,
+            createdAt,
+          },
+        });
+        onToast('سُجِّل المرتجع محلياً — يُزامَن فور عودة الاتصال', 'success');
+        kickSync();
+        onChanged();
+        onClose();
       } catch (error) {
-        toast(
-          error instanceof Error ? error.message : 'فشل تسجيل الإرجاع',
+        onToast(
+          error instanceof Error ? error.message : 'تعذر تسجيل المرتجع',
           'error',
         );
       } finally {
         setBusy(false);
       }
     },
-    [detail, exchange, onDone, quantities, toast],
+    [
+      canReturn,
+      deviceId,
+      exchangeProductId,
+      invoice.displayNumber,
+      invoice.ref,
+      invoice.status,
+      invoice.syncedNumber,
+      items,
+      onChanged,
+      onClose,
+      onToast,
+      online,
+      products,
+      quantities,
+    ],
   );
 
   return (
-    <Sheet visible onClose={onClose}>
-      <Text style={sheetStyles.title}>{detail.sale.number}</Text>
-      <Text style={sheetStyles.dim}>
-        {formatDateTime(detail.sale.createdAt)} · الإجمالي{' '}
-        {formatMoney(detail.sale.total)}
-        {detail.returnsSoFar > 0 ? ` · مرتجعات سابقة: ${detail.returnsSoFar}` : ''}
-      </Text>
+    <Sheet visible onClose={onClose} title={`فاتورة ${invoice.displayNumber}`}>
+      <View style={styles.metaRow}>
+        <Badge
+          label={
+            invoice.kind === 'return'
+              ? 'مرتجع'
+              : invoice.payKind === 'debt'
+              ? 'بيع بالدين'
+              : 'بيع نقدي'
+          }
+          tone={
+            invoice.kind === 'return' ? 'danger' : invoice.payKind === 'debt' ? 'info' : 'success'
+          }
+        />
+        {invoice.status === 'pending' ? (
+          <Badge label="بانتظار المزامنة" tone="warning" />
+        ) : null}
+        {invoice.status === 'rejected' ? (
+          <Badge label="مرفوضة" tone="danger" />
+        ) : null}
+        <View style={{flex: 1}} />
+        <Text style={styles.dim}>{invoice.createdAt.slice(0, 16)}</Text>
+      </View>
 
-      {detail.sale.isReturn ? (
-        <Text style={sheetStyles.dim}>
-          هذه فاتورة مرتجع — لا يُرجع منها.
+      {invoice.status === 'rejected' && invoice.rejectReason ? (
+        <View style={styles.rejectBox}>
+          <Icon name="alert" size={16} color={c.danger} />
+          <Text style={styles.rejectText}>{invoice.rejectReason}</Text>
+        </View>
+      ) : null}
+
+      {items.length === 0 ? (
+        <Text style={styles.dim}>
+          فاتورة من جهاز آخر — تفاصيل أصنافها محفوظة في نقطة البيع.
         </Text>
       ) : (
-        <>
-          <Text style={sheetStyles.section}>الكميات المطلوب إرجاعها</Text>
-          <ScrollView style={{maxHeight: 260}} contentContainerStyle={{gap: 8}}>
-            {detail.lines.map(line => (
-              <View key={line.saleItemId} style={sheetStyles.lineRow}>
-                <View style={{flex: 1}}>
-                  <Text style={sheetStyles.lineName} numberOfLines={1}>
-                    {line.productName}
-                  </Text>
-                  <Text style={sheetStyles.dim}>
-                    بيع {formatQty(line.quantity)}
-                    {line.unitName ? ` ${line.unitName}` : ''} · متبقٍ{' '}
-                    {formatQty(line.remaining)}
-                  </Text>
-                </View>
-                <View style={sheetStyles.qtyBox}>
-                  <TextInput
-                    style={sheetStyles.qtyInput}
-                    value={quantities[line.saleItemId] ?? ''}
-                    onChangeText={text =>
-                      setQuantities(prev => ({
-                        ...prev,
-                        [line.saleItemId]: text,
-                      }))
-                    }
-                    keyboardType="decimal-pad"
-                    placeholder="0"
-                    placeholderTextColor={palette.textFaint}
-                  />
-                </View>
-              </View>
-            ))}
-          </ScrollView>
-
-          {exchange.length > 0 ? (
-            <View style={{gap: 6}}>
-              <Text style={sheetStyles.section}>بضاعة الاستبدال</Text>
-              {exchange.map((item, index) => (
-                <View key={`${item.productId}-${index}`} style={sheetStyles.lineRow}>
-                  <View style={{flex: 1}}>
-                    <Text style={sheetStyles.lineName} numberOfLines={1}>
-                      {item.name}
-                    </Text>
-                    <Text style={sheetStyles.dim}>
-                      الكمية {formatQty(item.qty)}
-                    </Text>
-                  </View>
-                  <Pressable
-                    onPress={() =>
-                      setExchange(prev => prev.filter((_, i) => i !== index))
-                    }>
-                    <Text style={sheetStyles.removeBtn}>حذف</Text>
-                  </Pressable>
-                </View>
-              ))}
+        items.map((item, index) => (
+          <View key={item.id} style={styles.itemRow}>
+            <View style={{flex: 1}}>
+              <Text style={styles.itemName}>
+                {item.name}
+                {item.variantLabel ? ` (${item.variantLabel})` : ''}
+                {item.unitName && item.unitName !== 'حبة'
+                  ? ` (${item.unitName})`
+                  : ''}
+              </Text>
+              <Text style={styles.dim}>
+                {formatQty(item.quantity)} × {formatMoney(item.unitPrice)} ={' '}
+                {formatMoney(item.lineTotal)}
+              </Text>
             </View>
-          ) : null}
-
-          <BigButton
-            title="إرجاع نقدي (من الخزينة)"
-            variant="danger"
-            busy={busy}
-            disabled={busy}
-            onPress={() => void submit('cash')}
-          />
-          <BigButton
-            title="استبدال ببضاعة أخرى…"
-            variant="ghost"
-            disabled={busy}
-            onPress={() => setExchangeOpen(true)}
-          />
-          {exchange.length > 0 ? (
-            <BigButton
-              title="تأكيد الاستبدال"
-              variant="success"
-              busy={busy}
-              disabled={busy}
-              onPress={() => void submit('exchange')}
-            />
-          ) : null}
-        </>
+            {isSale && returnMode ? (
+              <View style={styles.qtyPick}>
+                <Pressable
+                  style={styles.qtyBtn}
+                  onPress={() =>
+                    setQuantities(q => ({
+                      ...q,
+                      [index]: Math.min(
+                        remainingFor(index),
+                        (q[index] ?? 0) + 1,
+                      ),
+                    }))
+                  }>
+                  <Text style={styles.qtyBtnText}>+</Text>
+                </Pressable>
+                <Text style={styles.qtyValue}>
+                  {quantities[index] ?? 0}
+                </Text>
+                <Pressable
+                  style={styles.qtyBtn}
+                  onPress={() =>
+                    setQuantities(q => ({...q, [index]: Math.max(0, (q[index] ?? 0) - 1)}))
+                  }>
+                  <Text style={styles.qtyBtnText}>−</Text>
+                </Pressable>
+                <Text style={styles.remaining}>
+                  / {formatQty(remainingFor(index))}
+                </Text>
+              </View>
+            ) : null}
+          </View>
+        ))
       )}
 
-      {exchangeOpen ? (
-        <ExchangePickerSheet
-          onClose={() => setExchangeOpen(false)}
-          onPick={(product, unitId, qty) => {
-            const unit = product.units.find(u => u.id === unitId);
-            setExchange(prev => [
-              ...prev,
-              {
-                productId: product.id,
-                unitId,
-                name:
-                  product.name + (unit ? ` (${unit.name})` : ''),
-                qty,
-              },
-            ]);
-            setExchangeOpen(false);
-          }}
-        />
-      ) : null}
-    </Sheet>
-  );
-}
-
-/** اختيار بضاعة الاستبدال من الكتالوج. */
-function ExchangePickerSheet({
-  onClose,
-  onPick,
-}: {
-  onClose: () => void;
-  onPick: (
-    product: CatalogProduct,
-    unitId: number | null,
-    quantity: number,
-  ) => void;
-}) {
-  const toast = useToastStore(s => s.show);
-  const products = useCatalogStore(s => s.products);
-  const [search, setSearch] = useState('');
-  const [picked, setPicked] = useState<CatalogProduct | null>(null);
-  const [unitId, setUnitId] = useState<number | null>(null);
-  const [quantity, setQuantity] = useState('1');
-
-  const visible = products.filter(product => {
-    if (product.hasVariants) {
-      return false;
-    }
-    if (search.trim().length === 0) {
-      return true;
-    }
-    return product.name.toLowerCase().includes(search.trim().toLowerCase());
-  });
-
-  return (
-    <Sheet visible onClose={onClose}>
-      <Text style={sheetStyles.title}>بضاعة الاستبدال</Text>
-      <View style={sheetStyles.searchBox}>
-        <TextInput
-          style={sheetStyles.searchInput}
-          value={search}
-          onChangeText={setSearch}
-          placeholder="ابحث…"
-          placeholderTextColor={palette.textFaint}
-          textAlign={I18nManager.isRTL ? 'right' : 'left'}
-        />
+      <View style={styles.totalsRow}>
+        <Text style={styles.dim}>
+          الخصم {formatMoney(invoice.discount)} · الإجمالي
+        </Text>
+        <Text style={styles.totalText}>{formatMoney(invoice.total)}</Text>
       </View>
-      <ScrollView style={{maxHeight: 240}} contentContainerStyle={{gap: 6}}>
-        {visible.slice(0, 40).map(product => (
-          <Pressable
-            key={product.id}
-            style={[
-              sheetStyles.lineRow,
-              picked?.id === product.id ? {borderColor: palette.accent} : null,
-            ]}
-            onPress={() => {
-              setPicked(product);
-              setUnitId(null);
-            }}>
-            <View style={{flex: 1}}>
-              <Text style={sheetStyles.lineName} numberOfLines={1}>
-                {product.name}
-              </Text>
-              <Text style={sheetStyles.dim}>
-                {formatMoney(
-                  product.retailPrice *
-                    (1 - Math.min(95, product.discountPct || 0) / 100),
-                )}
-              </Text>
-            </View>
-            {picked?.id === product.id ? <Chip label="مختار" tone="accent" /> : null}
-          </Pressable>
-        ))}
-      </ScrollView>
-      {picked ? (
+
+      {isSale && canReturn && items.length > 0 ? (
         <>
-          {picked.units.length > 0 ? (
-            <View style={sheetStyles.unitRow}>
-              <Pressable
-                style={[
-                  sheetStyles.unitChip,
-                  unitId == null ? {borderColor: palette.accent} : null,
-                ]}
-                onPress={() => setUnitId(null)}>
-                <Text style={sheetStyles.unitText}>حبة</Text>
-              </Pressable>
-              {picked.units.map(unit => (
-                <Pressable
-                  key={unit.id}
-                  style={[
-                    sheetStyles.unitChip,
-                    unitId === unit.id ? {borderColor: palette.accent} : null,
-                  ]}
-                  onPress={() => setUnitId(unit.id)}>
-                  <Text style={sheetStyles.unitText}>{unit.name}</Text>
-                </Pressable>
-              ))}
-            </View>
-          ) : null}
-          <LabeledInput
-            label="الكمية"
-            value={quantity}
-            onChangeText={setQuantity}
-            numeric
-          />
-          <BigButton
-            title="إضافة للاستبدال"
-            onPress={() => {
-              const qty = Number(quantity.replace(',', '.')) || 0;
-              if (qty <= 0) {
-                toast('كمية غير صالحة', 'error');
-                return;
-              }
-              onPick(picked, unitId, qty);
-            }}
-          />
+          {!returnMode ? (
+            <AppButton
+              title="إرجاع / استبدال أصناف"
+              icon="undo"
+              variant="secondary"
+              onPress={() => setReturnMode(true)}
+            />
+          ) : (
+            <>
+              {exchangeMode ? (
+                <View style={styles.exchangeBox}>
+                  <Text style={styles.dim}>
+                    منتج الاستبدال — يُسعَّر من نقطة البيع بأسعاره الحالية:
+                  </Text>
+                  <ScrollView
+                    horizontal
+                    showsHorizontalScrollIndicator={false}
+                    contentContainerStyle={{gap: 6}}>
+                    {products.slice(0, 24).map(product => (
+                      <Pressable
+                        key={product.id}
+                        style={[
+                          styles.exchangeChip,
+                          exchangeProductId === product.id
+                            ? {borderColor: c.accent}
+                            : null,
+                        ]}
+                        onPress={() => setExchangeProductId(product.id)}>
+                        <Text
+                          style={styles.exchangeName}
+                          numberOfLines={1}>
+                          {product.name}
+                        </Text>
+                        <Text style={styles.exchangePrice}>
+                          {formatMoney(
+                            product.hasVariants
+                              ? variantPrice(product, product.variants[0])
+                              : linePrice(product, null),
+                          )}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </ScrollView>
+                </View>
+              ) : null}
+              <View style={{flexDirection: 'row-reverse', gap: 8}}>
+                <AppButton
+                  title="تأكيد الإرجاع"
+                  variant="danger"
+                  small
+                  style={{flex: 1}}
+                  loading={busy}
+                  disabled={busy}
+                  onPress={() => void submitReturn(false)}
+                />
+                <AppButton
+                  title={exchangeMode ? 'تأكيد الاستبدال' : 'استبدال'}
+                  variant="primary"
+                  small
+                  style={{flex: 1}}
+                  loading={busy}
+                  disabled={busy}
+                  onPress={() => {
+                    if (exchangeMode) {
+                      void submitReturn(true);
+                    } else {
+                      setExchangeMode(true);
+                    }
+                  }}
+                />
+                <AppButton
+                  title="إلغاء"
+                  variant="ghost"
+                  small
+                  onPress={() => {
+                    setReturnMode(false);
+                    setExchangeMode(false);
+                    setQuantities({});
+                  }}
+                />
+              </View>
+              {invoice.status === 'pending' ? (
+                <Text style={styles.dim}>
+                  الفاتورة الأصلية بانتظار المزامنة — المرتجع سيُحل عنها
+                  تلقائياً بعد مزامنتها (طابورك بالتسلسل).
+                </Text>
+              ) : !online ? (
+                <Text style={styles.dim}>
+                  لا اتصال الآن — يُسجَّل المرتجع محلياً ويُزامَن تلقائياً.
+                </Text>
+              ) : null}
+            </>
+          )}
         </>
       ) : null}
     </Sheet>
   );
 }
 
-const sheetStyles = StyleSheet.create({
-  title: {
-    color: palette.text,
-    fontFamily: fonts.black,
-    fontSize: typography.heading,
-    textAlign: 'right',
-  },
-  dim: {
-    color: palette.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    textAlign: 'right',
-    lineHeight: 18,
-  },
-  section: {
-    color: palette.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-    textAlign: 'right',
-    marginTop: 4,
-  },
-  lineRow: {
-    backgroundColor: palette.surfaceHi,
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: 12,
-    padding: spacing.md,
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: 8,
-  },
-  lineName: {
-    color: palette.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.small + 1,
-    textAlign: 'right',
-  },
-  qtyBox: {
-    width: 74,
-    backgroundColor: palette.surface,
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: 10,
-  },
-  qtyInput: {
-    color: palette.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-    paddingVertical: 8,
-    textAlign: 'center',
-  },
-  removeBtn: {
-    color: palette.danger,
-    fontFamily: fonts.medium,
-    fontSize: typography.small,
-  },
-  searchBox: {
-    backgroundColor: palette.surfaceHi,
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: 12,
-    paddingHorizontal: 12,
-  },
-  searchInput: {
-    color: palette.text,
-    fontFamily: fonts.regular,
-    fontSize: typography.body,
-    paddingVertical: 10,
-  },
-  unitRow: {flexDirection: 'row-reverse', flexWrap: 'wrap', gap: 8},
-  unitChip: {
-    backgroundColor: palette.surfaceHi,
-    borderWidth: 1,
-    borderColor: palette.border,
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-  },
-  unitText: {
-    color: palette.textDim,
-    fontFamily: fonts.medium,
-    fontSize: typography.small,
-  },
-});
+const useStyles = makeStyles(c =>
+  ({
+    screen: {flex: 1, backgroundColor: c.bg},
+    padded: {padding: spacing.md, paddingBottom: 4},
+    row: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: spacing.md,
+      backgroundColor: c.surface,
+      borderRadius: 14,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.md,
+    },
+    kindChip: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    number: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      textAlign: 'right',
+      flexShrink: 1,
+    },
+    dim: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+      lineHeight: 18,
+    },
+    total: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+  }) as const,
+);
 
-const styles = StyleSheet.create({
-  screen: {flex: 1, backgroundColor: palette.bg},
-  row: {
-    backgroundColor: palette.surface,
-    borderRadius: 14,
-    borderWidth: 1,
-    borderColor: palette.border,
-    padding: spacing.md,
-    flexDirection: 'row-reverse',
-    alignItems: 'center',
-    gap: spacing.md,
-  },
-  rowIcon: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    backgroundColor: palette.surfaceHi,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  rowIconText: {color: palette.accent, fontSize: 18, fontFamily: fonts.bold},
-  rowNumber: {
-    color: palette.text,
-    fontFamily: fonts.bold,
-    fontSize: typography.body,
-    textAlign: 'right',
-  },
-  rowMeta: {
-    color: palette.textDim,
-    fontFamily: fonts.regular,
-    fontSize: typography.small,
-    textAlign: 'right',
-    marginTop: 2,
-  },
-  rowAmount: {
-    color: palette.text,
-    fontFamily: fonts.black,
-    fontSize: typography.body,
-  },
-  busyOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.35)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-});
+const useDetailStyles = makeStyles(c =>
+  ({
+    metaRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 6,
+      flexWrap: 'wrap',
+    },
+    dim: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+      lineHeight: 18,
+    },
+    rejectBox: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: c.dangerSoft,
+      borderRadius: 10,
+      padding: spacing.sm + 2,
+    },
+    rejectText: {
+      color: c.danger,
+      fontFamily: fonts.medium,
+      fontSize: typography.small,
+      flex: 1,
+      textAlign: 'right',
+    },
+    itemRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: 10,
+      padding: spacing.sm + 2,
+    },
+    itemName: {
+      color: c.text,
+      fontFamily: fonts.medium,
+      fontSize: typography.small + 1,
+      textAlign: 'right',
+    },
+    qtyPick: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      gap: 7,
+    },
+    qtyBtn: {
+      width: 30,
+      height: 30,
+      borderRadius: 9,
+      backgroundColor: c.surface,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    qtyBtnText: {color: c.text, fontSize: 16, fontFamily: fonts.bold},
+    qtyValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+      minWidth: 26,
+      textAlign: 'center',
+    },
+    remaining: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+    },
+    totalsRow: {
+      flexDirection: 'row-reverse',
+      alignItems: 'center',
+      justifyContent: 'space-between',
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+      paddingTop: spacing.sm,
+    },
+    totalText: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+    },
+    exchangeBox: {gap: 8},
+    exchangeChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 12,
+      paddingHorizontal: 12,
+      paddingVertical: 8,
+      gap: 2,
+      maxWidth: 130,
+    },
+    exchangeName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      textAlign: 'right',
+    },
+    exchangePrice: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.micro + 2,
+      textAlign: 'right',
+    },
+  }) as const,
+);

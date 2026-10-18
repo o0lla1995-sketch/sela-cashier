@@ -1,6 +1,10 @@
 <resources>
 
     <!-- Base application theme — خلفية داكنة كهوية سيلا. -->
+    <style name="AppTheme.NoActionBar" parent="AppTheme">
+        <item name="android:windowFullscreen">false</item>
+    </style>
+
     <style name="AppTheme" parent="Theme.AppCompat.NoActionBar">
         <item name="android:editTextBackground">@drawable/rn_edit_text_material</item>
         <item name="android:windowBackground">#0E0E12</item>

@@ -1,6 +1,6 @@
 {
   "name": "SelaCashier",
-  "version": "0.0.1",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
@@ -13,6 +13,7 @@
     "react": "18.3.1",
     "react-native": "0.77.3",
     "react-native-safe-area-context": "^5.10.1",
+    "react-native-svg": "^15.12.1",
     "zustand": "^5.0.15"
   },
   "devDependencies": {
