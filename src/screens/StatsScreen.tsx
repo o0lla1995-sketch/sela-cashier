@@ -170,9 +170,9 @@ const useStyles = makeStyles(c =>
   ({
     screen: {flex: 1, backgroundColor: c.bg},
     pendingCard: {gap: 8, borderColor: c.warningSoft},
-    okCard: {gap: 8, flexDirection: 'row-reverse', alignItems: 'center'},
+    okCard: {gap: 8, flexDirection: 'row', alignItems: 'center'},
     grid: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       flexWrap: 'wrap',
       gap: spacing.sm,
     },
@@ -184,7 +184,7 @@ const useStyles = makeStyles(c =>
       lineHeight: 18,
     },
     barRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       paddingVertical: 5,
@@ -216,7 +216,7 @@ const useStyles = makeStyles(c =>
       textAlign: 'left',
     },
     topRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
     },

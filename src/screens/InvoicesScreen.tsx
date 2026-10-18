@@ -153,7 +153,7 @@ export function InvoicesScreen() {
                 />
               </View>
               <View style={{flex: 1, minWidth: 0}}>
-                <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 6}}>
+                <View style={{flexDirection: 'row', alignItems: 'center', gap: 6}}>
                   <Text style={styles.number} numberOfLines={1}>
                     {invoice.displayNumber}
                   </Text>
@@ -574,7 +574,7 @@ function InvoiceDetailSheet({
                         </Text>
                         <Text style={styles.exchangePrice}>
                           {formatMoney(
-                            product.hasVariants
+                            product.hasVariants && product.variants.length > 0
                               ? variantPrice(product, product.variants[0])
                               : linePrice(product, null),
                           )}
@@ -584,7 +584,7 @@ function InvoiceDetailSheet({
                   </ScrollView>
                 </View>
               ) : null}
-              <View style={{flexDirection: 'row-reverse', gap: 8}}>
+              <View style={{flexDirection: 'row', gap: 8}}>
                 <AppButton
                   title="تأكيد الإرجاع"
                   variant="danger"
@@ -643,7 +643,7 @@ const useStyles = makeStyles(c =>
     screen: {flex: 1, backgroundColor: c.bg},
     padded: {padding: spacing.md, paddingBottom: 4},
     row: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       backgroundColor: c.surface,
@@ -684,7 +684,7 @@ const useStyles = makeStyles(c =>
 const useDetailStyles = makeStyles(c =>
   ({
     metaRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 6,
       flexWrap: 'wrap',
@@ -697,7 +697,7 @@ const useDetailStyles = makeStyles(c =>
       lineHeight: 18,
     },
     rejectBox: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       backgroundColor: c.dangerSoft,
@@ -712,7 +712,7 @@ const useDetailStyles = makeStyles(c =>
       textAlign: 'right',
     },
     itemRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       backgroundColor: c.surfaceAlt,
@@ -726,7 +726,7 @@ const useDetailStyles = makeStyles(c =>
       textAlign: 'right',
     },
     qtyPick: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 7,
     },
@@ -754,7 +754,7 @@ const useDetailStyles = makeStyles(c =>
       fontSize: typography.micro,
     },
     totalsRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
       borderTopWidth: 1,

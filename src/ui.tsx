@@ -89,7 +89,7 @@ export function AppHeader({
 const useHeaderStyles = makeStyles(c =>
   StyleSheet.create({
     wrap: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm + 2,
       paddingHorizontal: spacing.md,
@@ -187,7 +187,7 @@ export function AppButton({
 const useButtonStyles = makeStyles(c =>
   StyleSheet.create({
     base: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'center',
       gap: 7,
@@ -484,7 +484,7 @@ export function SearchBar({
 const useSearchStyles = makeStyles(c =>
   StyleSheet.create({
     box: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       backgroundColor: c.surface,
@@ -551,7 +551,7 @@ export function Segmented<T extends string | number>({
 const useSegmentedStyles = makeStyles(c =>
   StyleSheet.create({
     track: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       backgroundColor: c.surfaceHi,
       borderRadius: 12,
       padding: 3,
@@ -621,7 +621,7 @@ export function Stepper({
 const useStepperStyles = makeStyles(c =>
   StyleSheet.create({
     row: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
     },
@@ -684,7 +684,7 @@ export function SwitchRow({
 const useSwitchStyles = makeStyles(c =>
   StyleSheet.create({
     row: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       paddingVertical: spacing.sm + 2,
@@ -782,7 +782,7 @@ const useFieldStyles = makeStyles(c =>
       textAlign: 'right',
     },
     box: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       backgroundColor: c.surfaceHi,
       borderRadius: 12,

@@ -339,7 +339,7 @@ export function LoginScreen() {
         {phase === 'login' ? (
           <>
             <Card style={{gap: spacing.sm}}>
-              <View style={{flexDirection: 'row-reverse', alignItems: 'center', gap: 8}}>
+              <View style={{flexDirection: 'row', alignItems: 'center', gap: 8}}>
                 <Icon name="store" size={17} color={c.success} />
                 <Text style={styles.strong}>{storeName || 'متجر'}</Text>
                 <View style={{flex: 1}} />
@@ -456,7 +456,7 @@ const useStyles = makeStyles(c =>
       paddingBottom: spacing.xxl,
     },
     brandRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       marginVertical: spacing.lg,
@@ -484,7 +484,7 @@ const useStyles = makeStyles(c =>
       marginTop: 2,
     },
     qrCard: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
       borderColor: c.accentSoft,
@@ -513,7 +513,7 @@ const useStyles = makeStyles(c =>
       marginTop: 2,
     },
     sectionRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       marginTop: spacing.sm,
     },
@@ -525,7 +525,7 @@ const useStyles = makeStyles(c =>
       textAlign: 'right',
     },
     refreshChip: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 5,
       backgroundColor: c.surfaceHi,
@@ -539,7 +539,7 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 2,
     },
     storeCard: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
     },

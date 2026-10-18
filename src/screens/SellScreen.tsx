@@ -62,6 +62,12 @@ import {kickSync, useSyncStore} from '../store/sync';
 // ── صورة منتج كسولة (بطاقة) ──────────────────────────────────────
 function ProductThumb({product}: {product: CatalogProduct}) {
   const c = useThemeColors();
+  // v2.1 — إصلاح الانهيار القاتل: كان الخطاف يُستدعى داخل فرع واحد
+  // فقط (بعد return مبكر)، فحين تصل الصورة ويعاد الرسم تختلف عدد
+  // الخطافات → «Rendered fewer hooks» → إغلاق فوري للتطبيق، وبما أن
+  // الصور مخزنة على القرص يتكرر الانهيار مع كل إقلاع (حلقة موت).
+  // القاعدة: كل الخطافات في أعلى المكون دائماً قبل أي return.
+  const thumbStyles = useThumbStyles();
   const [base64, setBase64] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -87,12 +93,12 @@ function ProductThumb({product}: {product: CatalogProduct}) {
     );
   }
   return (
-    <View style={useThumbStyles().placeholder}>
+    <View style={thumbStyles.placeholder}>
       {product.hasVariants ? (
         <Icon name="shapes" size={20} color={c.textFaint} />
       ) : (
-        <Text style={useThumbStyles().glyph}>
-          {product.name.trim().charAt(0)}
+        <Text style={thumbStyles.glyph}>
+          {String(product.name ?? '').trim().charAt(0)}
         </Text>
       )}
     </View>
@@ -784,18 +790,18 @@ export function SellScreen() {
               onPress={() => tryAdd(item)}>
               <ProductThumb product={item} />
               <Text style={styles.tileName} numberOfLines={2}>
-                {item.name}
+                {String(item.name ?? '')}
               </Text>
               <Text style={styles.tilePrice}>
                 {formatMoney(
-                  item.hasVariants
+                  item.hasVariants && item.variants.length > 0
                     ? variantPrice(
                         item,
                         item.variants[0],
                       )
                     : linePrice(item, null),
                 )}
-                {item.hasVariants ? '+' : ''}
+                {item.hasVariants && item.variants.length > 0 ? '+' : ''}
               </Text>
               {item.units.length > 0 ? (
                 <Text style={styles.tileUnits} numberOfLines={1}>
@@ -860,9 +866,9 @@ export function SellScreen() {
                   <Pressable
                     style={styles.qtyBtn}
                     onPress={() =>
-                      cart.setQuantity(line.key, line.quantity - 1)
+                      cart.setQuantity(line.key, line.quantity + 1)
                     }>
-                    <Text style={styles.qtyBtnText}>−</Text>
+                    <Text style={styles.qtyBtnText}>+</Text>
                   </Pressable>
                   <Text style={styles.qtyValue}>
                     {formatQty(line.quantity)}
@@ -870,9 +876,9 @@ export function SellScreen() {
                   <Pressable
                     style={styles.qtyBtn}
                     onPress={() =>
-                      cart.setQuantity(line.key, line.quantity + 1)
+                      cart.setQuantity(line.key, line.quantity - 1)
                     }>
-                    <Text style={styles.qtyBtnText}>+</Text>
+                    <Text style={styles.qtyBtnText}>−</Text>
                   </Pressable>
                 </View>
               </View>
@@ -980,7 +986,7 @@ export function SellScreen() {
 // ── الأنماط ──────────────────────────────────────────────────────
 const useSheetStyles = makeStyles(c =>
   ({
-    metaRow: {flexDirection: 'row-reverse', flexWrap: 'wrap', gap: 6},
+    metaRow: {flexDirection: 'row', flexWrap: 'wrap', gap: 6},
     group: {gap: 8},
     groupTitle: {
       color: c.textDim,
@@ -988,7 +994,7 @@ const useSheetStyles = makeStyles(c =>
       fontSize: typography.small,
       textAlign: 'right',
     },
-    chipRow: {flexDirection: 'row-reverse', flexWrap: 'wrap', gap: 8},
+    chipRow: {flexDirection: 'row', flexWrap: 'wrap', gap: 8},
     chip: {
       backgroundColor: c.surfaceHi,
       borderWidth: 1,
@@ -1033,7 +1039,7 @@ const useCustomerStyles = makeStyles(c =>
       backgroundColor: c.surfaceHi,
       borderRadius: 12,
       padding: spacing.md,
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm,
     },
@@ -1050,7 +1056,7 @@ const useStyles = makeStyles(c =>
   ({
     screen: {flex: 1, backgroundColor: c.bg},
     searchRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       gap: 8,
       padding: 8,
       paddingBottom: 4,
@@ -1147,7 +1153,7 @@ const useStyles = makeStyles(c =>
       gap: 8,
     },
     cartHead: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       justifyContent: 'space-between',
     },
@@ -1163,7 +1169,7 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
     },
     cartRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       backgroundColor: c.surfaceAlt,
@@ -1182,7 +1188,7 @@ const useStyles = makeStyles(c =>
       fontSize: typography.micro + 1,
       textAlign: 'right',
     },
-    qtyRow: {flexDirection: 'row-reverse', alignItems: 'center', gap: 8},
+    qtyRow: {flexDirection: 'row', alignItems: 'center', gap: 8},
     qtyBtn: {
       width: 30,
       height: 30,
@@ -1202,7 +1208,7 @@ const useStyles = makeStyles(c =>
       textAlign: 'center',
     },
     discountRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
     },
@@ -1233,7 +1239,7 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.black,
       fontSize: typography.heading,
     },
-    checkoutRow: {flexDirection: 'row-reverse', gap: 8},
+    checkoutRow: {flexDirection: 'row', gap: 8},
     invoiceBackdrop: {
       flex: 1,
       backgroundColor: c.overlay,

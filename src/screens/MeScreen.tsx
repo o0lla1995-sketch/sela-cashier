@@ -184,7 +184,7 @@ const useStyles = makeStyles(c =>
   ({
     screen: {flex: 1, backgroundColor: c.bg},
     accountCard: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.md,
     },
@@ -215,7 +215,7 @@ const useStyles = makeStyles(c =>
       lineHeight: 19,
     },
     permRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: spacing.sm + 2,
       paddingVertical: 4,

@@ -25,6 +25,66 @@ interface CatalogState {
   refresh: () => Promise<void>;
 }
 
+/**
+ * v2.1 — تطبيع بطاقة المنتج قبل دخولها الواجهة: يضمن أن units و
+ * variants مصفوفتان دائماً وأن كل الحقول من الأنواع الصحيحة، مهما
+ * أرسل الخادم أو أخفى التخزين المؤقت — فلا ينهار أي رسم أبداً
+ * («Cannot read property of undefined») حتى مع بيانات قديمة/شاذة.
+ */
+function normalizeProducts(list: unknown): CatalogProduct[] {
+  if (!Array.isArray(list)) {
+    return [];
+  }
+  return list.map(item => {
+    const raw = (item ?? {}) as Record<string, unknown>;
+    return {
+      id: Number(raw.id ?? 0),
+      name: String(raw.name ?? ''),
+      categoryId:
+        raw.categoryId == null ? null : Number(raw.categoryId),
+      categoryName: String(raw.categoryName ?? ''),
+      retailPrice: Number(raw.retailPrice ?? 0) || 0,
+      wholesalePrice: Number(raw.wholesalePrice ?? 0) || 0,
+      costPrice: Number(raw.costPrice ?? 0) || 0,
+      discountPct: Number(raw.discountPct ?? 0) || 0,
+      stockQty: Number(raw.stockQty ?? 0) || 0,
+      stockUntracked: Boolean(raw.stockUntracked),
+      byWeight: Boolean(raw.byWeight),
+      barcode: raw.barcode == null ? null : String(raw.barcode),
+      hasVariants: Boolean(raw.hasVariants),
+      hasImage: Boolean(raw.hasImage),
+      units: Array.isArray(raw.units)
+        ? raw.units
+            .filter(u => u != null)
+            .map(u => ({
+              id: Number(u.id ?? 0),
+              name: String(u.name ?? ''),
+              short: String(u.short ?? ''),
+              conversion: Number(u.conversion ?? 1) || 1,
+              retailPrice:
+                u.retailPrice == null ? null : Number(u.retailPrice),
+              barcode: u.barcode == null ? null : String(u.barcode),
+            }))
+        : [],
+      variants: Array.isArray(raw.variants)
+        ? raw.variants
+            .filter(v => v != null)
+            .map(v => ({
+              id: Number(v.id ?? 0),
+              kind: v.kind === 'size' ? ('size' as const) : ('variant' as const),
+              color: String(v.color ?? ''),
+              size: String(v.size ?? ''),
+              retailPrice:
+                v.retailPrice == null ? null : Number(v.retailPrice),
+              costPrice:
+                v.costPrice == null ? null : Number(v.costPrice),
+              stockQty: Number(v.stockQty ?? 0) || 0,
+            }))
+        : [],
+    };
+  });
+}
+
 export const useCatalogStore = create<CatalogState>((set, get) => ({
   products: [],
   loading: false,
@@ -35,7 +95,7 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
     if (get().lastFetchAt > 0) {
       return;
     }
-    const cached = await loadCachedCatalog();
+    const cached = normalizeProducts(await loadCachedCatalog());
     if (cached.length > 0) {
       set({products: cached, fromCache: true, lastFetchAt: -1});
     }
@@ -49,13 +109,13 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
     set({loading: true});
     try {
       const payload = await CashierApi.catalog();
-      const products = payload.products ?? [];
+      const products = normalizeProducts(payload?.products ?? []);
       set({products, lastFetchAt: Date.now(), fromCache: false});
       await cacheCatalog(products);
     } catch {
       // فشل الجلب — النسخة المخزنة (إن وجدت) تبقى شغالة.
       if (get().lastFetchAt === 0) {
-        const cached = await loadCachedCatalog();
+        const cached = normalizeProducts(await loadCachedCatalog());
         if (cached.length > 0) {
           set({products: cached, fromCache: true, lastFetchAt: -1});
         }

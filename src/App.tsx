@@ -43,6 +43,103 @@ import {MeScreen} from './screens/MeScreen';
 
 type TabKey = 'sell' | 'invoices' | 'stats' | 'me';
 
+/**
+ * v2.1 — حاجز الأخطاء الجذري: أي استثناء عرض (مهما كان مصدره)
+ * يُلتقط هنا فتظهر بطاقة عربية واضحة وزر إعادة تشغيل الواجهة —
+ * بدل الإغلاق الفوري الصامت للتطبيق (نفس درس الجولة 63 في نقطة
+ * البيع: «أي شاشة تنهار لا تُسقط البرنامج كله»). المفتاح key
+ * يتغيّر عند «إعادة المحاولة» فيُعاد تركيب الشجرة من الصفر.
+ */
+class RootErrorBoundary extends React.Component<
+  {children: React.ReactNode},
+  {errorText: string | null}
+> {
+  state: {errorText: string | null} = {errorText: null};
+
+  static getDerivedStateFromError(error: unknown): {
+    errorText: string | null;
+  } {
+    const message =
+      error instanceof Error ? error.message : String(error ?? '');
+    return {errorText: message || 'خطأ غير معروف'};
+  }
+
+  render() {
+    if (this.state.errorText != null) {
+      return (
+        <SafeAreaProvider>
+          <SafeAreaView
+            style={{flex: 1, backgroundColor: '#0E0E12'}}
+            edges={['top', 'bottom']}>
+            <View
+              style={{
+                flex: 1,
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: 28,
+                gap: 14,
+              }}>
+              <View
+                style={{
+                  width: 68,
+                  height: 68,
+                  borderRadius: 20,
+                  backgroundColor: 'rgba(248,113,113,0.14)',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}>
+                <Text style={{fontSize: 32}}>⚠</Text>
+              </View>
+              <Text
+                style={{
+                  color: '#F2F3F6',
+                  fontSize: 18,
+                  fontWeight: '800',
+                  textAlign: 'center',
+                }}>
+                واجه خطأً في العرض
+              </Text>
+              <Text
+                style={{
+                  color: '#878D99',
+                  fontSize: 13.5,
+                  textAlign: 'center',
+                  lineHeight: 20,
+                }}>
+                عملياتك المسجّلة محفوظة وسليمة. اضغط إعادة المحاولة — إن
+                تكرر الخطأ أعد فتح التطبيق أو راجع المسؤول.
+              </Text>
+              <Text
+                style={{
+                  color: '#878D99',
+                  fontSize: 11,
+                  textAlign: 'center',
+                }}
+                numberOfLines={3}>
+                {this.state.errorText}
+              </Text>
+              <Pressable
+                style={{
+                  backgroundColor: '#F97316',
+                  borderRadius: 13,
+                  paddingHorizontal: 28,
+                  paddingVertical: 13,
+                  marginTop: 6,
+                }}
+                onPress={() => this.setState({errorText: null})}>
+                <Text style={{color: '#FFFFFF', fontWeight: '800', fontSize: 15}}>
+                  إعادة المحاولة
+                </Text>
+              </Pressable>
+            </View>
+          </SafeAreaView>
+        </SafeAreaProvider>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 const TABS: {key: TabKey; label: string; icon: IconName}[] = [
   {key: 'sell', label: 'البيع', icon: 'cart'},
   {key: 'invoices', label: 'فواتيري', icon: 'receipt'},
@@ -217,9 +314,11 @@ export default function App() {
   }
 
   return (
-    <SafeAreaProvider>
-      {token ? <MainTabs /> : <LoginScreen />}
-    </SafeAreaProvider>
+    <RootErrorBoundary>
+      <SafeAreaProvider>
+        {token ? <MainTabs /> : <LoginScreen />}
+      </SafeAreaProvider>
+    </RootErrorBoundary>
   );
 }
 
@@ -239,7 +338,7 @@ const useStyles = makeStyles(c =>
       borderBottomColor: c.borderSoft,
     },
     headerRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 10,
       paddingHorizontal: 14,
@@ -278,7 +377,7 @@ const useStyles = makeStyles(c =>
       backgroundColor: c.surface,
       borderTopWidth: 1,
       borderTopColor: c.borderSoft,
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
     },
     tab: {
       flex: 1,
@@ -301,7 +400,7 @@ const useStyles = makeStyles(c =>
 const useSyncBarStyles = makeStyles(c =>
   StyleSheet.create({
     bar: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       paddingHorizontal: spacing.md,
@@ -310,7 +409,7 @@ const useSyncBarStyles = makeStyles(c =>
       borderBottomColor: c.borderSoft,
     },
     dotRow: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 7,
       flex: 1,
@@ -323,7 +422,7 @@ const useSyncBarStyles = makeStyles(c =>
       flexShrink: 1,
     },
     pendingChip: {
-      flexDirection: 'row-reverse',
+      flexDirection: 'row',
       alignItems: 'center',
       gap: 5,
       backgroundColor: c.surface,
