@@ -174,6 +174,7 @@ export const useSyncStore = create<SyncState & SyncActions>((set, get) => ({
 
 let monitorStarted = false;
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
+let cycleTimer: ReturnType<typeof setInterval> | null = null;
 let fastUntil = 0;
 
 /**
@@ -213,8 +214,8 @@ export function startSyncMonitor(): void {
   monitorTimer = setInterval(() => {
     void tick();
   }, 6000);
-  // دورة أبطأ للسحب العام.
-  setInterval(() => {
+  // دورة أبطأ للسحب العام (سحب فواتير من أجهزة أخرى + كتالوج).
+  cycleTimer = setInterval(() => {
     void useSyncStore.getState().runCycle();
   }, 30000);
 }
@@ -223,6 +224,10 @@ export function stopSyncMonitor(): void {
   if (monitorTimer != null) {
     clearInterval(monitorTimer);
     monitorTimer = null;
+  }
+  if (cycleTimer != null) {
+    clearInterval(cycleTimer);
+    cycleTimer = null;
   }
   monitorStarted = false;
 }
