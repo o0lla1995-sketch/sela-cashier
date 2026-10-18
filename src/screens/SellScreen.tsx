@@ -203,7 +203,12 @@ function WeightSheet({
 }: {
   product: CatalogProduct | null;
   onClose: () => void;
-  onConfirm: (product: CatalogProduct, kg: number) => void;
+  /** kg = وزن مكتوب (بلا unitId) أو وحدة واحدة من unitId بسعرها. */
+  onConfirm: (
+    product: CatalogProduct,
+    kg: number,
+    unitId: number | null,
+  ) => void;
 }) {
   const c = useThemeColors();
   const styles = useWeightSheetStyles();
@@ -314,7 +319,8 @@ function WeightSheet({
                     key={unit.id}
                     style={styles.quickChip}
                     onPress={() => {
-                      onConfirm(product, unit.conversion);
+                      // وحدة واحدة بسعرها الخاص (وليس كغ بسعر الكيلو).
+                      onConfirm(product, 1, unit.id);
                       setWeightText('');
                     }}>
                     <Text style={styles.quickValue} numberOfLines={1}>
@@ -337,7 +343,7 @@ function WeightSheet({
                     key={entry.kg}
                     style={styles.quickChip}
                     onPress={() => {
-                      onConfirm(product, entry.kg);
+                      onConfirm(product, entry.kg, null);
                       setWeightText('');
                     }}>
                     <Text style={styles.quickValue}>{formatQty(entry.kg)}</Text>
@@ -363,7 +369,7 @@ function WeightSheet({
               if (validWeight <= 0) {
                 return;
               }
-              onConfirm(product, validWeight);
+              onConfirm(product, validWeight, null);
               setWeightText('');
             }}
             disabled={validWeight <= 0}
@@ -1657,8 +1663,11 @@ export function SellScreen() {
         <WeightSheet
           product={weightProduct}
           onClose={() => setWeightProduct(null)}
-          onConfirm={(product, kg) => {
-            const result = cart.add(product, null, kg, null);
+          onConfirm={(product, kg, unitId) => {
+            const result =
+              unitId != null
+                ? cart.add(product, unitId, 1, null)
+                : cart.add(product, null, kg, null);
             if (!result.ok && result.reason) {
               toast(result.reason, 'error');
               return;

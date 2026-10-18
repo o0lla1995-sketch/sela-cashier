@@ -279,7 +279,7 @@ export function MeScreen() {
         variant="danger"
         onPress={() => void signOut()}
       />
-      <Text style={styles.version}>سيلّا كاشير · الإصدار 3.0.0 (4)</Text>
+      <Text style={styles.version}>سيلّا كاشير · الإصدار 3.0.1 (5)</Text>
     </ScrollView>
   );
 }
