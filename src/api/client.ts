@@ -190,9 +190,12 @@ export const CashierApi = {
     clientRef?: string;
     /** v2.0: زمن البيع الفعلي عند الكاشير YYYY-MM-DD HH:mm:ss. */
     createdAt?: string;
+    /** v3.0: طباعة الفاتورة من طابعة نقطة البيع المتصلة. */
+    print?: boolean;
   }): Promise<{
     ok: boolean;
     duplicate?: boolean;
+    printed?: boolean;
     invoice: {
       id: number;
       number: string;
@@ -220,6 +223,24 @@ export const CashierApi = {
     return request('GET', '/api/invoice', {query: {id: String(id)}});
   },
 
+  /** v3.0: البحث عن فاتورتي برقمها (باركود الإيصال CODE128 يحمّل
+   *  رقم الفاتورة) — على مستوى فواتير حسابي أنا فقط. */
+  invoiceByNumber(
+    number: string,
+  ): Promise<{invoice: CashierInvoice | null}> {
+    return request('GET', '/api/invoice-by-number', {
+      query: {number},
+    });
+  },
+
+  /** v3.0: حالة طابعة نقطة البيع — لتفعيل طباعة الفواتير منها. */
+  printerStatus(): Promise<{
+    connected: boolean;
+    name: string | null;
+  }> {
+    return request('GET', '/api/printer-status', {timeoutMs: 6000});
+  },
+
   return(input: {
     saleId?: number;
     /** v2.0: مرجع الفاتورة الأصلية إن أُجريت دون اتصال. */
@@ -230,9 +251,12 @@ export const CashierApi = {
     note?: string;
     clientRef?: string;
     createdAt?: string;
+    /** v3.0: طباعة إيصال المرتجع من طابعة نقطة البيع المتصلة. */
+    print?: boolean;
   }): Promise<{
     ok: boolean;
     duplicate?: boolean;
+    printed?: boolean;
     return: {
       id: number;
       number: string;

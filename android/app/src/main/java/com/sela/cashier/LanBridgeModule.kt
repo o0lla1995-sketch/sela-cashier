@@ -279,7 +279,7 @@ class LanBridgeModule(reactContext: ReactApplicationContext) :
     }
   }
 
-  // ── v2.0: مسح باركود الاتصال (QR) ──────────────────────────────
+  // ── v2.0: مسح باركود الاتصال (QR) + v3.0: مسح باركود المنتجات ─
 
   private var qrPromise: Promise? = null
   private val activityEventListener = object : BaseActivityEventListener() {
@@ -309,9 +309,13 @@ class LanBridgeModule(reactContext: ReactApplicationContext) :
     reactApplicationContext.addActivityEventListener(activityEventListener)
   }
 
-  /** فتح نافذة مسح QR الأصلية — يعيد نص البطاقة أو يرفض عند الإلغاء. */
+  /**
+   * فتح نافذة المسح الأصلية — يعيد نص البطاقة أو يرفض عند الإلغاء.
+   * v3.0: mode = "barcode" يفتح ماسح باركود المنتجات (كل الصيغ
+   * التجارية) بدل ماسح QR الاتصال — نفس زر المسح في نقطة البيع.
+   */
   @ReactMethod
-  fun scanQr(promise: Promise) {
+  fun scanQr(mode: String, promise: Promise) {
     val currentActivity = currentActivity
     if (currentActivity == null) {
       promise.reject("NO_ACTIVITY", "لا توجد نافذة نشطة")
@@ -319,10 +323,15 @@ class LanBridgeModule(reactContext: ReactApplicationContext) :
     }
     qrPromise = promise
     try {
-      currentActivity.startActivityForResult(
-        Intent(currentActivity, QrScanActivity::class.java),
-        QR_REQUEST_CODE,
+      val intent = Intent(currentActivity, QrScanActivity::class.java)
+      intent.putExtra(
+        QrScanActivity.EXTRA_MODE,
+        if (mode == QrScanActivity.MODE_BARCODE)
+          QrScanActivity.MODE_BARCODE
+        else
+          QrScanActivity.MODE_QR
       )
+      currentActivity.startActivityForResult(intent, QR_REQUEST_CODE)
     } catch (e: Exception) {
       qrPromise = null
       promise.reject("QR_FAILED", e.message, e)

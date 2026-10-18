@@ -1,26 +1,36 @@
 /**
- * screens/SellScreen.tsx — v2.0: البيع بهوية نقطة البيع كاملة.
+ * screens/SellScreen.tsx — v3.0: البيع بهوية نقطة البيع أندرويد حرفياً.
  * ─────────────────────────────────────────────────────────────────
- * ① شبكة منتجات ببطاقات تحمل الصور فعلياً (تُجلب كسولاً وتُخزَّن).
- * ② بحث بالاسم/الباركود بزر مسح واضح + فلترة تصنيفات.
- * ③ نافذة بيع كاملة: الوحدات (حبة/علبة/غرام) + المتغيرات
- *    (لون×مقاس للملابس، حجم للمطاعم) + الكمية/الوزن — إصلاح «خطأ
- *    منتج متغيرات» نهائياً.
- * ④ سلة بنمط نقطة البيع: تعديل كميات، خصم بسقف صلاحيتك، إجماليات.
- * ⑤ إتمام نقدي أو دين دفتر المتجر (إن سمح المسؤول).
- * ⑥ يعمل كاملاً دون اتصال: العملية تُسجَّل محلياً برقم مؤقت وتُزامَن
- *    فور عودة الشبكة — بلا أي ازدواج أو تعارض أرقام (clientRef).
+ * طلب التاجر: «ركّز جيداً في تصميم تطبيق الكاشير كما هو في هوية
+ * تطبيق نقطة البيع أندرويد — لن نعيد اختراع العجلة». هذه الشاشة
+ * منقولة من PosScreen بنقطة البيع:
+ *
+ * ① زر مسح الباركود بجانب البحث (على اليمين) — نافذة المسح
+ *    الأصلية نفسها؛ الباركود يضيف المنتج مباشرة أو يفتح نافذته.
+ * ② بلا تصنيفات (طلب حرفي: «احذفها غير مهمة») — البحث يكفي.
+ * ③ ثلاثة أشكال عرض (شبكة/قائمة/بطاقات) — نفس بلاطات نقطة البيع:
+ *    صورة فعلية، سعر مخفّض مشطوب، نقطة مخزون ملونة، شارة وزن،
+ *    تعتيم النافد ومنع بيعه (نفس حارس مخزون السلة في نقطة البيع).
+ * ④ لوحة الوزن: لوحة مفاتيح عشرية مدمجة + أوزان سريعة (وقية/
+ *    نصف/كيلو) + وحدات المنتج نفسه — لا كيبورد نظام إطلاقاً.
+ * ⑤ نافذة البيع الموحدة: أحجام (مطعم) / لون→مقاس (ملابس) /
+ *    وحدات (صيدلية) — نفس تقسيم نقطة البيع.
+ * ⑥ السلة بنمط نقطة البيع: رأس بزرَي تكبير/تصغير + شارة عدد +
+ *    تفريغ، أسطر مع Stepper وشارة متغير/وحدة، خصم برقائق 5%/10%.
+ * ⑦ كل النوافذ INLINE overlay — لا RN Modal بعد النشاط الأصلي
+ *    (الماسح) — نفس درس الروم في نقطة البيع.
  */
 import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
   ActivityIndicator,
+  Dimensions,
   FlatList,
   I18nManager,
   Image,
-  Modal,
   Pressable,
   RefreshControl,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   View,
@@ -29,9 +39,6 @@ import {
   AppButton,
   Badge,
   EmptyState,
-  Field,
-  SearchBar,
-  Sheet,
   useToastStore,
 } from '../ui';
 import {Icon} from '../Icon';
@@ -50,24 +57,80 @@ import {
   availableStock,
   imageStore,
   linePrice,
+  sellableNow,
   useCartStore,
   useCatalogStore,
   variantLabel as makeVariantLabel,
   variantPrice,
 } from '../store/catalog';
 import {useSessionStore} from '../store/session';
-import {loadCachedCustomers, nextLocalNumber, recordLocalOp} from '../store/offline';
+import {useAppSettings} from '../store/settings';
+import {scanProductBarcode} from '../native';
+import {
+  loadCachedCustomers,
+  nextLocalNumber,
+  recordLocalOp,
+} from '../store/offline';
 import {kickSync, useSyncStore} from '../store/sync';
 
-// ── صورة منتج كسولة (بطاقة) ──────────────────────────────────────
-function ProductThumb({product}: {product: CatalogProduct}) {
+const WEIGHT_UNIT_NAME = 'كغ';
+
+/** لوحة مفاتيح الوزن العشرية (نفس نقطة البيع — بلا كيبورد نظام). */
+const KEYPAD_KEYS: string[][] = [
+  ['7', '8', '9'],
+  ['4', '5', '6'],
+  ['1', '2', '3'],
+  ['.', '0', '⌫'],
+];
+
+/** الأوزان السريعة الإقليمية (نفس نقطة البيع). */
+const QUICK_WEIGHTS: {kg: number; label: string}[] = [
+  {kg: 0.25, label: 'وقية'},
+  {kg: 0.5, label: 'نصف كغ'},
+  {kg: 0.75, label: '٣ أرباع'},
+  {kg: 1, label: 'كيلو'},
+  {kg: 1.5, label: 'كغ ونص'},
+  {kg: 2, label: '٢ كغ'},
+];
+
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const GRID_COLUMNS = 3;
+const CARD_COLUMNS = 2;
+const GRID_GAP = spacing.sm;
+const GRID_TILE = Math.floor(
+  (SCREEN_WIDTH - spacing.md * 2 - GRID_GAP * (GRID_COLUMNS - 1)) /
+    GRID_COLUMNS,
+);
+const CARD_TILE = Math.floor(
+  (SCREEN_WIDTH - spacing.md * 2 - GRID_GAP * (CARD_COLUMNS - 1)) /
+    CARD_COLUMNS,
+);
+
+/** سعر بلاطة المنتج: أرخص حجم/متغير عند وجودها (+ مؤشر «+»). */
+function tilePrice(product: CatalogProduct): {
+  label: string;
+  plus: boolean;
+} {
+  if (product.hasVariants && product.variants.length > 0) {
+    const prices = product.variants.map(v => variantPrice(product, v));
+    return {label: formatMoney(Math.min(...prices)), plus: true};
+  }
+  return {label: formatMoney(linePrice(product, null)), plus: false};
+}
+
+// ── صورة منتج كسولة (بلاطة) ──────────────────────────────────────
+function ProductThumb({
+  product,
+  height = 62,
+  big = false,
+}: {
+  product: CatalogProduct;
+  height?: number;
+  big?: boolean;
+}) {
   const c = useThemeColors();
-  // v2.1 — إصلاح الانهيار القاتل: كان الخطاف يُستدعى داخل فرع واحد
-  // فقط (بعد return مبكر)، فحين تصل الصورة ويعاد الرسم تختلف عدد
-  // الخطافات → «Rendered fewer hooks» → إغلاق فوري للتطبيق، وبما أن
-  // الصور مخزنة على القرص يتكرر الانهيار مع كل إقلاع (حلقة موت).
-  // القاعدة: كل الخطافات في أعلى المكون دائماً قبل أي return.
-  const thumbStyles = useThumbStyles();
+  // v2.1 — إصلاح الانهيار القاتل: كل الخطافات في أعلى المكون دائماً
+  // قبل أي return (درس «Rendered fewer hooks»).
   const [base64, setBase64] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -87,17 +150,29 @@ function ProductThumb({product}: {product: CatalogProduct}) {
     return (
       <Image
         source={{uri: `data:image/jpeg;base64,${base64}`}}
-        style={{width: '100%', height: 62, borderRadius: 9}}
+        style={{width: '100%', height, borderRadius: 10}}
         resizeMode="cover"
       />
     );
   }
   return (
-    <View style={thumbStyles.placeholder}>
+    <View
+      style={[
+        useThumbHolderStyles().placeholder,
+        {height, borderRadius: 10},
+      ]}>
       {product.hasVariants ? (
-        <Icon name="shapes" size={20} color={c.textFaint} />
+        <Icon
+          name="shapes"
+          size={big ? 34 : 20}
+          color={c.textFaint}
+        />
       ) : (
-        <Text style={thumbStyles.glyph}>
+        <Text
+          style={[
+            useThumbHolderStyles().glyph,
+            {fontSize: big ? 30 : 22},
+          ]}>
           {String(product.name ?? '').trim().charAt(0)}
         </Text>
       )}
@@ -105,12 +180,10 @@ function ProductThumb({product}: {product: CatalogProduct}) {
   );
 }
 
-const useThumbStyles = makeStyles(c =>
+const useThumbHolderStyles = makeStyles(c =>
   ({
     placeholder: {
       width: '100%',
-      height: 62,
-      borderRadius: 9,
       backgroundColor: c.surfaceAlt,
       alignItems: 'center',
       justifyContent: 'center',
@@ -118,66 +191,247 @@ const useThumbStyles = makeStyles(c =>
     glyph: {
       color: c.textFaint,
       fontFamily: fonts.black,
-      fontSize: 22,
     },
   }) as const,
 );
 
-// ── نافذة بيع منتج: وحدات + متغيرات + كمية/وزن ───────────────────
-function SellProductSheet({
+// ── لوحة الوزن (INLINE — لا Modal بعد الماسح أبداً) ──────────────
+function WeightSheet({
+  product,
+  onClose,
+  onConfirm,
+}: {
+  product: CatalogProduct | null;
+  onClose: () => void;
+  onConfirm: (product: CatalogProduct, kg: number) => void;
+}) {
+  const c = useThemeColors();
+  const styles = useWeightSheetStyles();
+  const [weightText, setWeightText] = useState('');
+
+  useEffect(() => {
+    setWeightText('');
+  }, [product?.id]);
+
+  if (product == null) {
+    return null;
+  }
+  const kiloPrice = linePrice(product, null);
+  const rawKiloPrice = product.retailPrice;
+  const hasDiscount = product.discountPct > 0;
+  const weight =
+    weightText.length > 0 ? Number(weightText.replace(',', '.')) : NaN;
+  const validWeight =
+    !Number.isNaN(weight) && weight > 0
+      ? Math.round(weight * 1000) / 1000
+      : 0;
+  const total = validWeight > 0 ? validWeight * kiloPrice : 0;
+  const stock = availableStock(product, null, null);
+
+  const pressKey = (key: string) => {
+    setWeightText(prev => {
+      if (key === '⌫') {
+        return prev.length <= 1 ? '' : prev.slice(0, -1);
+      }
+      if (key === '.') {
+        if (prev.includes('.')) {
+          return prev;
+        }
+        return prev === '' ? '0.' : `${prev}.`;
+      }
+      if (prev.replace('.', '').length >= 6) {
+        return prev;
+      }
+      if (prev === '0') {
+        return key;
+      }
+      return prev + key;
+    });
+  };
+
+  return (
+    <View style={styles.overlay} pointerEvents="box-none">
+      <Pressable style={styles.dim} onPress={onClose} />
+      <View style={styles.sheet}>
+        <View style={styles.headerRow}>
+          <View style={{flex: 1}}>
+            <Text style={styles.title} numberOfLines={1}>
+              {product.name}
+            </Text>
+            <Text style={styles.kiloPrice} numberOfLines={1}>
+              سعر الكيلو: {formatMoney(kiloPrice)}
+              {hasDiscount
+                ? ` (خصم ${product.discountPct}% بدلاً من ${formatMoney(rawKiloPrice)})`
+                : ''}{' '}
+              · المتاح {formatQty(stock)} {WEIGHT_UNIT_NAME}
+            </Text>
+          </View>
+          <Pressable style={styles.clearChip} onPress={() => setWeightText('')}>
+            <Text style={styles.clearText}>مسح</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.displayRow}>
+          <Text
+            style={[
+              styles.display,
+              weightText === '' ? {color: c.textFaint} : null,
+            ]}>
+            {weightText === '' ? '0' : weightText}
+          </Text>
+          <Text style={styles.displayUnit}>{WEIGHT_UNIT_NAME}</Text>
+          {total > 0 ? (
+            <Text style={styles.displayTotal} numberOfLines={1}>
+              = {formatMoney(total)}
+            </Text>
+          ) : null}
+        </View>
+
+        <View style={styles.padRow}>
+          <View style={styles.keypad}>
+            {KEYPAD_KEYS.map((row, rowIndex) => (
+              <View key={rowIndex} style={styles.keypadRow}>
+                {row.map(key => (
+                  <Pressable
+                    key={key}
+                    style={[
+                      styles.keypadKey,
+                      key === '⌫' ? styles.keypadKeyDanger : null,
+                    ]}
+                    onPress={() => pressKey(key)}>
+                    <Text style={styles.keypadKeyText}>{key}</Text>
+                  </Pressable>
+                ))}
+              </View>
+            ))}
+          </View>
+          <View style={styles.quickColumn}>
+            {product.units.length > 0 ? (
+              <>
+                <Text style={styles.quickLabel}>وحدات المنتج</Text>
+                {product.units.map(unit => (
+                  <Pressable
+                    key={unit.id}
+                    style={styles.quickChip}
+                    onPress={() => {
+                      onConfirm(product, unit.conversion);
+                      setWeightText('');
+                    }}>
+                    <Text style={styles.quickValue} numberOfLines={1}>
+                      {unit.name}
+                    </Text>
+                    <Text style={styles.quickName} numberOfLines={1}>
+                      {formatQty(unit.conversion)} {WEIGHT_UNIT_NAME} ·{' '}
+                      {formatMoney(
+                        unit.retailPrice ?? product.retailPrice * unit.conversion,
+                      )}
+                    </Text>
+                  </Pressable>
+                ))}
+              </>
+            ) : (
+              <>
+                <Text style={styles.quickLabel}>أوزان سريعة</Text>
+                {QUICK_WEIGHTS.map(entry => (
+                  <Pressable
+                    key={entry.kg}
+                    style={styles.quickChip}
+                    onPress={() => {
+                      onConfirm(product, entry.kg);
+                      setWeightText('');
+                    }}>
+                    <Text style={styles.quickValue}>{formatQty(entry.kg)}</Text>
+                    <Text style={styles.quickName}>{entry.label}</Text>
+                  </Pressable>
+                ))}
+              </>
+            )}
+          </View>
+        </View>
+
+        <View style={styles.actionRow}>
+          <AppButton
+            title="إلغاء"
+            variant="secondary"
+            onPress={onClose}
+            style={{flex: 1}}
+          />
+          <AppButton
+            title={`أضف للسلة${total > 0 ? ` · ${formatMoney(total)}` : ''}`}
+            icon="check"
+            onPress={() => {
+              if (validWeight <= 0) {
+                return;
+              }
+              onConfirm(product, validWeight);
+              setWeightText('');
+            }}
+            disabled={validWeight <= 0}
+            style={{flex: 1.8}}
+          />
+        </View>
+      </View>
+    </View>
+  );
+}
+
+// ── نافذة البيع الموحدة (أحجام/ملابس/وحدات) — INLINE ────────────
+export function SaleSheet({
   product,
   onClose,
   onAdd,
 }: {
-  product: CatalogProduct;
+  product: CatalogProduct | null;
   onClose: () => void;
   onAdd: (
+    product: CatalogProduct,
     unitId: number | null,
     quantity: number,
     variantId: number | null,
   ) => void;
 }) {
   const c = useThemeColors();
-  const styles = useSheetStyles();
+  const styles = useSaleSheetStyles();
   const [variantId, setVariantId] = useState<number | null>(null);
   const [unitId, setUnitId] = useState<number | null>(null);
-  const [quantity, setQuantity] = useState('1');
+  const [color, setColor] = useState('');
+  const [quantity, setQuantity] = useState(1);
 
   const clothingVariants = useMemo(
-    () => product.variants.filter(v => v.kind === 'variant'),
-    [product.variants],
+    () =>
+      product?.variants.filter(v => v.kind === 'variant' && v.color) ?? [],
+    [product],
   );
   const sizeVariants = useMemo(
-    () => product.variants.filter(v => v.kind === 'size'),
-    [product.variants],
+    () => product?.variants.filter(v => v.kind === 'size') ?? [],
+    [product],
   );
   const colors = useMemo(
     () => Array.from(new Set(clothingVariants.map(v => v.color))),
     [clothingVariants],
   );
-  const [color, setColor] = useState<string>(colors[0] ?? '');
   const sizesOfColor = useMemo(
     () => clothingVariants.filter(v => v.color === color),
     [clothingVariants, color],
   );
 
-  const chosenVariant: CatalogVariant | null = useMemo(() => {
-    if (sizeVariants.length > 0) {
-      return sizeVariants.find(v => v.id === variantId) ?? null;
+  useEffect(() => {
+    if (product == null) {
+      return;
     }
-    if (clothingVariants.length > 0) {
-      return clothingVariants.find(v => v.id === variantId) ?? null;
-    }
-    return null;
-  }, [clothingVariants, sizeVariants, variantId]);
+    setVariantId(null);
+    setUnitId(null);
+    setQuantity(1);
+    setColor(colors[0] ?? '');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product?.id]);
 
-  // اختيار أول متغير تلقائياً (أول لون+مقاس متاح).
+  // أول متغير متاح تلقائياً (أول لون+مقاس له رصيد).
   useEffect(() => {
     if (sizeVariants.length > 0 && variantId == null) {
       setVariantId(sizeVariants[0].id);
+      return;
     }
-  }, [sizeVariants, variantId]);
-  useEffect(() => {
     if (clothingVariants.length > 0 && variantId == null) {
       const available =
         sizesOfColor.find(v => v.stockQty > 0) ?? sizesOfColor[0];
@@ -185,204 +439,256 @@ function SellProductSheet({
         setVariantId(available.id);
       }
     }
-  }, [clothingVariants.length, sizesOfColor, variantId, clothingVariants]);
+  }, [clothingVariants, sizeVariants, sizesOfColor, variantId]);
 
+  if (product == null) {
+    return null;
+  }
+
+  const chosenVariant: CatalogVariant | null =
+    sizeVariants.length > 0 || clothingVariants.length > 0
+      ? product.variants.find(v => v.id === variantId) ?? null
+      : null;
   const chosenUnit = product.units.find(u => u.id === unitId);
   const unitPrice = chosenVariant
     ? variantPrice(product, chosenVariant)
     : linePrice(product, unitId);
-  const qty = Number(quantity.replace(',', '.')) || 0;
-  const stock = availableStock(product, unitId, variantId);
   const isWeight = product.byWeight && !chosenUnit && !chosenVariant;
+  const stock = availableStock(product, unitId, variantId);
+  const step = isWeight ? 0.25 : 1;
 
   return (
-    <Sheet visible onClose={onClose} title={product.name}>
-      <View style={styles.metaRow}>
-        {product.discountPct > 0 ? (
-          <Badge label={`خصم المنتج ${product.discountPct}%`} tone="accent" />
-        ) : null}
-        <Badge label={product.categoryName} tone="neutral" />
-        {!product.stockUntracked ? (
-          <Badge
-            label={`المخزون ${formatQty(stock)}`}
-            tone={stock > 0 ? 'info' : 'danger'}
-          />
-        ) : (
-          <Badge label="بلا تتبع مخزون" tone="neutral" />
-        )}
-      </View>
-
-      {/* أحجام بسعر (مطعم/كافيتريا) */}
-      {sizeVariants.length > 0 ? (
-        <View style={styles.group}>
-          <Text style={styles.groupTitle}>اختر الحجم</Text>
-          <View style={styles.chipRow}>
-            {sizeVariants.map(v => (
-              <Pressable
-                key={v.id}
-                style={[
-                  styles.chip,
-                  variantId === v.id ? styles.chipActive : null,
-                ]}
-                onPress={() => setVariantId(v.id)}>
-                <Text
-                  style={[
-                    styles.chipText,
-                    variantId === v.id ? {color: c.accent} : null,
-                  ]}>
-                  {v.size}
-                </Text>
-                <Text style={styles.chipPrice}>
-                  {formatMoney(variantPrice(product, v))}
-                </Text>
-              </Pressable>
-            ))}
+    <View style={styles.overlay} pointerEvents="box-none">
+      <Pressable style={styles.dim} onPress={onClose} />
+      <View style={styles.sheet}>
+        <View style={styles.headerRow}>
+          <View style={{flex: 1, minWidth: 0}}>
+            <Text style={styles.title} numberOfLines={1}>
+              {product.name}
+            </Text>
+            <Text style={styles.sub} numberOfLines={1}>
+              {product.discountPct > 0
+                ? `خصم ${product.discountPct}% · `
+                : ''}
+              {product.stockUntracked
+                ? 'يُباع دائماً'
+                : `المتاح ${formatQty(stock)} ${
+                    isWeight
+                      ? WEIGHT_UNIT_NAME
+                      : chosenUnit
+                      ? chosenUnit.name
+                      : 'حبة'
+                  }`}
+            </Text>
           </View>
+          <Pressable style={styles.closeBtn} onPress={onClose} hitSlop={8}>
+            <Icon name="x" size={15} color={c.textDim} />
+          </Pressable>
         </View>
-      ) : null}
 
-      {/* ملابس: لون ثم مقاس */}
-      {clothingVariants.length > 0 ? (
-        <>
-          <View style={styles.group}>
-            <Text style={styles.groupTitle}>اللون</Text>
-            <View style={styles.chipRow}>
-              {colors.map(name => (
-                <Pressable
-                  key={name}
-                  style={[
-                    styles.chip,
-                    color === name ? styles.chipActive : null,
-                  ]}
-                  onPress={() => {
-                    setColor(name);
-                    setVariantId(null);
-                  }}>
-                  <Text
+        <ScrollView
+          style={{flexGrow: 0, maxHeight: 330}}
+          contentContainerStyle={{gap: 12}}
+          showsVerticalScrollIndicator={false}>
+          {/* أحجام بسعر (مطعم/كافيتريا) */}
+          {sizeVariants.length > 0 ? (
+            <View style={styles.group}>
+              <Text style={styles.groupTitle}>اختر الحجم</Text>
+              <View style={styles.chipRow}>
+                {sizeVariants.map(v => (
+                  <Pressable
+                    key={v.id}
                     style={[
-                      styles.chipText,
-                      color === name ? {color: c.accent} : null,
-                    ]}>
-                    {name || '—'}
-                  </Text>
-                </Pressable>
-              ))}
+                      styles.chip,
+                      variantId === v.id ? styles.chipActive : null,
+                    ]}
+                    onPress={() => setVariantId(v.id)}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        variantId === v.id ? {color: c.accent} : null,
+                      ]}>
+                      {v.size}
+                    </Text>
+                    <Text style={styles.chipPrice}>
+                      {formatMoney(variantPrice(product, v))}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
             </View>
-          </View>
-          <View style={styles.group}>
-            <Text style={styles.groupTitle}>المقاس</Text>
-            <View style={styles.chipRow}>
-              {sizesOfColor.map(v => (
+          ) : null}
+
+          {/* ملابس: لون ثم مقاس */}
+          {clothingVariants.length > 0 ? (
+            <>
+              <View style={styles.group}>
+                <Text style={styles.groupTitle}>اللون</Text>
+                <View style={styles.chipRow}>
+                  {colors.map(name => (
+                    <Pressable
+                      key={name}
+                      style={[
+                        styles.chip,
+                        color === name ? styles.chipActive : null,
+                      ]}
+                      onPress={() => {
+                        setColor(name);
+                        setVariantId(null);
+                      }}>
+                      <Text
+                        style={[
+                          styles.chipText,
+                          color === name ? {color: c.accent} : null,
+                        ]}>
+                        {name || '—'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+              <View style={styles.group}>
+                <Text style={styles.groupTitle}>المقاس</Text>
+                <View style={styles.chipRow}>
+                  {sizesOfColor.map(v => (
+                    <Pressable
+                      key={v.id}
+                      style={[
+                        styles.chip,
+                        variantId === v.id ? styles.chipActive : null,
+                        v.stockQty <= 0 ? styles.chipOut : null,
+                      ]}
+                      onPress={() => setVariantId(v.id)}>
+                      <Text
+                        style={[
+                          styles.chipText,
+                          variantId === v.id ? {color: c.accent} : null,
+                        ]}>
+                        {v.size || '—'}
+                      </Text>
+                      <Text style={styles.chipPrice}>
+                        {v.stockQty > 0
+                          ? `متاح ${formatQty(v.stockQty)}`
+                          : 'نفد'}
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              </View>
+            </>
+          ) : null}
+
+          {/* الوحدات (حبة/علبة/شريط…) */}
+          {product.units.length > 0 && !chosenVariant ? (
+            <View style={styles.group}>
+              <Text style={styles.groupTitle}>وحدة البيع</Text>
+              <View style={styles.chipRow}>
                 <Pressable
-                  key={v.id}
-                  style={[
-                    styles.chip,
-                    variantId === v.id ? styles.chipActive : null,
-                    v.stockQty <= 0 ? styles.chipOut : null,
-                  ]}
-                  onPress={() => setVariantId(v.id)}>
+                  style={[styles.chip, unitId == null ? styles.chipActive : null]}
+                  onPress={() => setUnitId(null)}>
                   <Text
                     style={[
                       styles.chipText,
-                      variantId === v.id ? {color: c.accent} : null,
+                      unitId == null ? {color: c.accent} : null,
                     ]}>
-                    {v.size || '—'}
+                    حبة
                   </Text>
                   <Text style={styles.chipPrice}>
-                    {v.stockQty > 0 ? `متاح ${formatQty(v.stockQty)}` : 'نفد'}
+                    {formatMoney(product.retailPrice)}
                   </Text>
                 </Pressable>
-              ))}
+                {product.units.map(unit => (
+                  <Pressable
+                    key={unit.id}
+                    style={[
+                      styles.chip,
+                      unitId === unit.id ? styles.chipActive : null,
+                    ]}
+                    onPress={() => setUnitId(unit.id)}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        unitId === unit.id ? {color: c.accent} : null,
+                      ]}>
+                      {unit.name}
+                    </Text>
+                    <Text style={styles.chipPrice}>
+                      {formatMoney(
+                        unit.retailPrice ??
+                          product.retailPrice * unit.conversion,
+                      )}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            </View>
+          ) : null}
+
+          {/* الكمية (Stepper — لا كيبورد نظام) */}
+          <View style={styles.group}>
+            <Text style={styles.groupTitle}>
+              الكمية (
+              {chosenVariant
+                ? 'قطعة'
+                : chosenUnit
+                ? chosenUnit.name
+                : isWeight
+                ? WEIGHT_UNIT_NAME
+                : 'حبة'}
+              )
+            </Text>
+            <View style={styles.qtyRow}>
+              <Pressable
+                style={styles.qtyBtn}
+                onPress={() =>
+                  setQuantity(q => Math.max(step, Math.round((q - step) * 1000) / 1000))
+                }>
+                <Icon name="minus" size={15} color={c.text} />
+              </Pressable>
+              <Text style={styles.qtyValue}>{formatQty(quantity)}</Text>
+              <Pressable
+                style={styles.qtyBtn}
+                onPress={() =>
+                  setQuantity(q => Math.round((q + step) * 1000) / 1000)
+                }>
+                <Icon name="plus" size={15} color={c.text} />
+              </Pressable>
+              {isWeight ? (
+                <View style={styles.miniChips}>
+                  {[0.25, 0.5, 1].map(w => (
+                    <Pressable
+                      key={String(w)}
+                      style={[
+                        styles.miniChip,
+                        quantity === w ? styles.miniChipActive : null,
+                      ]}
+                      onPress={() => setQuantity(w)}>
+                      <Text
+                        style={[
+                          styles.miniChipText,
+                          quantity === w ? {color: c.accent} : null,
+                        ]}>
+                        {w} كغ
+                      </Text>
+                    </Pressable>
+                  ))}
+                </View>
+              ) : null}
             </View>
           </View>
-        </>
-      ) : null}
+        </ScrollView>
 
-      {/* الوحدات (حبة/علبة/غرام…) */}
-      {product.units.length > 0 && !chosenVariant ? (
-        <View style={styles.group}>
-          <Text style={styles.groupTitle}>وحدة البيع</Text>
-          <View style={styles.chipRow}>
-            <Pressable
-              style={[styles.chip, unitId == null ? styles.chipActive : null]}
-              onPress={() => setUnitId(null)}>
-              <Text
-                style={[
-                  styles.chipText,
-                  unitId == null ? {color: c.accent} : null,
-                ]}>
-                حبة
-              </Text>
-              <Text style={styles.chipPrice}>{formatMoney(product.retailPrice)}</Text>
-            </Pressable>
-            {product.units.map(unit => (
-              <Pressable
-                key={unit.id}
-                style={[
-                  styles.chip,
-                  unitId === unit.id ? styles.chipActive : null,
-                ]}
-                onPress={() => setUnitId(unit.id)}>
-                <Text
-                  style={[
-                    styles.chipText,
-                    unitId === unit.id ? {color: c.accent} : null,
-                  ]}>
-                  {unit.name}
-                </Text>
-                <Text style={styles.chipPrice}>
-                  {formatMoney(
-                    unit.retailPrice ?? product.retailPrice * unit.conversion,
-                  )}
-                </Text>
-              </Pressable>
-            ))}
-          </View>
-        </View>
-      ) : null}
-
-      {/* الكمية / الوزن */}
-      <Field
-        label={`الكمية (${chosenVariant ? 'قطعة' : chosenUnit ? chosenUnit.name : isWeight ? 'كيلو' : 'حبة'})`}
-        value={quantity}
-        onChangeText={setQuantity}
-        numeric
-      />
-      {isWeight ? (
-        <View style={styles.chipRow}>
-          {[0.25, 0.5, 1, 1.5, 2].map(w => (
-            <Pressable
-              key={String(w)}
-              style={[styles.chip, Number(quantity) === w ? styles.chipActive : null]}
-              onPress={() => setQuantity(String(w))}>
-              <Text style={styles.chipText}>{w} كغ</Text>
-            </Pressable>
-          ))}
-        </View>
-      ) : null}
-
-      {qty > 0 ? (
-        <Text style={styles.totalLine}>
-          {formatQty(qty)} × {formatMoney(unitPrice)} ={' '}
-          {formatMoney(unitPrice * qty)}
-        </Text>
-      ) : null}
-
-      <AppButton
-        title={
-          qty > 0 ? `أضف للسلة · ${formatMoney(unitPrice * qty)}` : 'أضف للسلة'
-        }
-        icon="plus"
-        onPress={() => {
-          if (qty <= 0) {
-            return;
-          }
-          onAdd(unitId, qty, variantId);
-          onClose();
-        }}
-        disabled={qty <= 0}
-      />
-    </Sheet>
+        <AppButton
+          title={`أضف للسلة · ${formatMoney(unitPrice * quantity)}`}
+          icon="plus"
+          onPress={() => {
+            onAdd(product, unitId, quantity, variantId);
+            onClose();
+          }}
+          disabled={quantity <= 0}
+        />
+      </View>
+    </View>
   );
 }
 
@@ -416,49 +722,60 @@ function CustomerPickerSheet({
   }, [toast]);
 
   return (
-    <Sheet visible onClose={onClose} title="بيع بالدين — اختر الزبون">
-      <Text style={styles.dim}>
-        يُسجَّل الدين في دفتر المتجر داخل نقطة البيع باسمك — حتى دون اتصال،
-        ويزامَن أول عودة للشبكة.
-      </Text>
-      {customers == null ? (
-        <ActivityIndicator color={c.accent} />
-      ) : customers.length === 0 ? (
-        <EmptyState
-          icon="book"
-          title="لا زبائن في الدفتر"
-          subtitle="أضف الزبون من شاشة «ديون المتجر» في نقطة البيع أولاً"
-        />
-      ) : (
-        <ScrollView style={{maxHeight: 340}} contentContainerStyle={{gap: 8}}>
-          {customers.map(customer => (
-            <Pressable
-              key={customer.id}
-              style={styles.row}
-              onPress={() => {
-                onPick(customer);
-                onClose();
-              }}>
-              <View style={{flex: 1}}>
-                <Text style={styles.name}>{customer.name}</Text>
-                <Text style={styles.dim}>
-                  {customer.idNumber}
-                  {customer.phone ? ` · ${customer.phone}` : ''}
-                </Text>
-              </View>
-              {customer.outstandingMinor > 0 ? (
-                <Badge
-                  label={`عليه ${formatMoney(customer.outstandingMinor / 100)}`}
-                  tone="warning"
-                />
-              ) : (
-                <Badge label="مسدَّد" tone="success" />
-              )}
-            </Pressable>
-          ))}
-        </ScrollView>
-      )}
-    </Sheet>
+    <View style={styles.overlay} pointerEvents="box-none">
+      <Pressable style={styles.dim} onPress={onClose} />
+      <View style={styles.sheet}>
+        <View style={styles.headerRow}>
+          <View style={{flex: 1}}>
+            <Text style={styles.title}>بيع بالدين — اختر الزبون</Text>
+            <Text style={styles.sub} numberOfLines={2}>
+              يُسجَّل الدين في دفتر المتجر داخل نقطة البيع باسمك — حتى دون
+              اتصال، ويزامَن أول عودة للشبكة.
+            </Text>
+          </View>
+          <Pressable style={styles.closeBtn} onPress={onClose} hitSlop={8}>
+            <Icon name="x" size={15} color={c.textDim} />
+          </Pressable>
+        </View>
+        {customers == null ? (
+          <ActivityIndicator color={c.accent} />
+        ) : customers.length === 0 ? (
+          <EmptyState
+            icon="book"
+            title="لا زبائن في الدفتر"
+            subtitle="أضف الزبون من شاشة «ديون المتجر» في نقطة البيع أولاً"
+          />
+        ) : (
+          <ScrollView style={{maxHeight: 340}} contentContainerStyle={{gap: 8}}>
+            {customers.map(customer => (
+              <Pressable
+                key={customer.id}
+                style={styles.row}
+                onPress={() => {
+                  onPick(customer);
+                  onClose();
+                }}>
+                <View style={{flex: 1}}>
+                  <Text style={styles.name}>{customer.name}</Text>
+                  <Text style={styles.dimText}>
+                    {customer.idNumber}
+                    {customer.phone ? ` · ${customer.phone}` : ''}
+                  </Text>
+                </View>
+                {customer.outstandingMinor > 0 ? (
+                  <Badge
+                    label={`عليه ${formatMoney(customer.outstandingMinor / 100)}`}
+                    tone="warning"
+                  />
+                ) : (
+                  <Badge label="مسدَّد" tone="success" />
+                )}
+              </Pressable>
+            ))}
+          </ScrollView>
+        )}
+      </View>
+    </View>
   );
 }
 
@@ -477,43 +794,48 @@ export function SellScreen() {
   const cashierName = useSessionStore(s => s.cashierName);
   const online = useSyncStore(s => s.online);
   const pending = useSyncStore(s => s.pending);
+  const productView = useAppSettings(s => s.productView);
+  const printReceipts = useAppSettings(s => s.printReceipts);
 
   const [search, setSearch] = useState('');
-  const [category, setCategory] = useState<number | 'all'>('all');
-  const [sellProduct, setSellProduct] = useState<CatalogProduct | null>(null);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [cartExpanded, setCartExpanded] = useState(false);
+  const [cartMinimized, setCartMinimized] = useState(false);
+  const [saleProduct, setSaleProduct] = useState<CatalogProduct | null>(null);
+  const [weightProduct, setWeightProduct] = useState<CatalogProduct | null>(
+    null,
+  );
   const [customerPicker, setCustomerPicker] = useState(false);
   const [discountText, setDiscountText] = useState('');
   const [busy, setBusy] = useState(false);
+  const [scanBusy, setScanBusy] = useState(false);
   const [lastInvoice, setLastInvoice] = useState<{
     number: string;
     total: number;
     pendingSync: boolean;
+    printed: boolean;
   } | null>(null);
   const searchRef = useRef<TextInput | null>(null);
+  const prevLinesCountRef = useRef(0);
 
   useEffect(() => {
     void hydrate();
   }, [hydrate]);
 
-  const categories = useMemo(() => {
-    const map = new Map<number, string>();
-    for (const product of products) {
-      if (product.categoryId != null) {
-        map.set(product.categoryId, product.categoryName);
-      }
+  // إعادة فتح السلة المطوية تلقائياً عند إضافة سطر جديد.
+  useEffect(() => {
+    if (cart.lines.length > prevLinesCountRef.current) {
+      setCartMinimized(false);
     }
-    return Array.from(map.entries()).map(([id, name]) => ({id, name}));
-  }, [products]);
+    prevLinesCountRef.current = cart.lines.length;
+  }, [cart.lines.length]);
 
   const visible = useMemo(() => {
     const query = search.trim().toLowerCase();
+    if (query.length === 0) {
+      return products;
+    }
     return products.filter(product => {
-      if (category !== 'all' && product.categoryId !== category) {
-        return false;
-      }
-      if (query.length === 0) {
-        return true;
-      }
       if (product.name.toLowerCase().includes(query)) {
         return true;
       }
@@ -524,9 +846,64 @@ export function SellScreen() {
         unit => unit.barcode && unit.barcode.includes(query),
       );
     });
-  }, [category, products, search]);
+  }, [products, search]);
 
-  // بحث الباركود: تطابق شبه كامل → أضف مباشرة.
+  /**
+   * فتح نافذة البيع المناسبة لمود المنتج — نفس تجان نقطة البيع:
+   * وزن → لوحة الوزن · متغيرات/أحجام → نافذة البيع · بسيط → إضافة.
+   */
+  const openSaleSheet = useCallback(
+    (product: CatalogProduct) => {
+      const sizeVariants = product.variants.filter(v => v.kind === 'size');
+      const clothingVariants = product.variants.filter(
+        v => v.kind === 'variant',
+      );
+      if (product.byWeight && product.variants.length === 0) {
+        setSaleProduct(null);
+        setWeightProduct(product);
+        return;
+      }
+      if (sizeVariants.length > 0 || clothingVariants.length > 0) {
+        setWeightProduct(null);
+        setSaleProduct(product);
+        return;
+      }
+      if (product.units.length > 0) {
+        setWeightProduct(null);
+        setSaleProduct(product);
+        return;
+      }
+      // منتج بسيط — إضافة مباشرة (حارس المخزون يحسم).
+      const result = cart.add(product, null, 1, null);
+      if (!result.ok && result.reason) {
+        toast(result.reason, 'error');
+      }
+    },
+    [cart, toast],
+  );
+
+  /** إضافة بالباركود (من الماسح أو بحث مطابق تماماً). */
+  const addByBarcode = useCallback(
+    (code: string) => {
+      const query = code.trim();
+      if (query.length === 0) {
+        return;
+      }
+      const hit = products.find(
+        p =>
+          p.barcode === query ||
+          p.units.some(u => u.barcode === query),
+      );
+      if (hit == null) {
+        toast(`لا منتج بهذا الباركود (${query})`, 'error');
+        return;
+      }
+      openSaleSheet(hit);
+    },
+    [products, openSaleSheet, toast],
+  );
+
+  // بحث الباركود المطبوع: تطابق شبه كامل → مسار الباركود نفسه.
   useEffect(() => {
     const query = search.trim();
     if (query.length < 4) {
@@ -537,33 +914,30 @@ export function SellScreen() {
         p.barcode === query ||
         p.units.some(u => u.barcode === query),
     );
-    if (exact && exact.hasVariants) {
-      setSellProduct(exact);
-      setSearch('');
-      return;
-    }
     if (exact) {
-      if (exact.units.length > 0 || exact.byWeight) {
-        setSellProduct(exact);
-      } else {
-        cart.add(exact, null, 1);
-      }
       setSearch('');
-      toast(`أُضيف «${exact.name}» بالباركود`, 'success');
+      addByBarcode(query);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, products]);
 
-  const tryAdd = useCallback(
-    (product: CatalogProduct) => {
-      if (product.units.length > 0 || product.hasVariants || product.byWeight) {
-        setSellProduct(product);
-        return;
+  /** فتح ماسح الباركود الأصلي (نفس زر نقطة البيع). */
+  const openScanner = useCallback(async () => {
+    if (scanBusy) {
+      return;
+    }
+    setScanBusy(true);
+    try {
+      const code = await scanProductBarcode();
+      if (code.length > 0) {
+        addByBarcode(code);
       }
-      cart.add(product, null, 1);
-    },
-    [cart],
-  );
+    } catch {
+      // أُلغي المسح — بلا رسالة.
+    } finally {
+      setScanBusy(false);
+    }
+  }, [scanBusy, addByBarcode]);
 
   const maxDiscountMoney = useMemo(
     () => (cart.subtotal() * perms.maxDiscountPct) / 100,
@@ -588,7 +962,9 @@ export function SellScreen() {
       const total = Math.max(0, subtotal - discount);
       const customerName =
         paymentType === 'debt'
-          ? (customerId != null ? 'زبون الدفتر' : '')
+          ? customerId != null
+            ? 'زبون الدفتر'
+            : ''
           : null;
 
       // ① محاولة الإرسال المباشر (وأنت متصل).
@@ -601,11 +977,13 @@ export function SellScreen() {
             localCustomerId: customerId,
             clientRef,
             createdAt,
+            print: printReceipts,
           });
           setLastInvoice({
             number: payload.invoice.number,
             total: payload.invoice.total,
             pendingSync: false,
+            printed: Boolean(payload.printed),
           });
           cart.clear();
           setDiscountText('');
@@ -672,6 +1050,7 @@ export function SellScreen() {
           number: displayNumber,
           total,
           pendingSync: true,
+          printed: false,
         });
         cart.clear();
         setDiscountText('');
@@ -684,7 +1063,15 @@ export function SellScreen() {
         );
       }
     },
-    [cart, deviceId, online, perms.maxDiscountPct, refreshCatalog, toast],
+    [
+      cart,
+      deviceId,
+      online,
+      perms.maxDiscountPct,
+      printReceipts,
+      refreshCatalog,
+      toast,
+    ],
   );
 
   const completeSale = useCallback(
@@ -702,275 +1089,582 @@ export function SellScreen() {
     [completeSaleInner],
   );
 
+  const itemsCount = cart.lines.reduce(
+    (sum, line) => sum + line.quantity,
+    0,
+  );
+
+  // ── بلاطة/صف/بطاقة منتج (نفس مكونات نقطة البيع) ──
+  const renderProduct = ({item}: {item: CatalogProduct}) => {
+    const weighted = item.byWeight && !item.hasVariants;
+    const out = !sellableNow(item);
+    const price = tilePrice(item);
+    const hasDiscount = item.discountPct > 0;
+    const rawPrice = item.hasVariants
+      ? price.label
+      : formatMoney(item.retailPrice);
+    const stockLabel = item.stockUntracked
+      ? 'يُباع دائماً'
+      : out
+      ? 'نفد'
+      : `${formatQty(item.stockQty)} ${weighted ? WEIGHT_UNIT_NAME : 'حبة'}`;
+    const stockColor = out ? c.danger : c.success;
+
+    if (productView === 'list') {
+      return (
+        <Pressable
+          style={[styles.listRow, out ? {opacity: 0.55} : null]}
+          onPress={() => openSaleSheet(item)}>
+          <View style={{width: 46}}>
+            <ProductThumb product={item} height={46} />
+          </View>
+          <View style={{flex: 1, gap: 2, minWidth: 0}}>
+            <Text style={styles.listName} numberOfLines={1}>
+              {item.name}
+              {item.hasVariants
+                ? item.variants[0]?.kind === 'size'
+                  ? ` · ${item.variants.length} أحجام`
+                  : ` · ${new Set(item.variants.map(v => v.color)).size} لون × ${new Set(item.variants.map(v => v.size)).size} مقاس`
+                : ''}
+            </Text>
+            <View style={styles.listMetaRow}>
+              <Text style={styles.listPrice}>
+                {hasDiscount ? (
+                  <Text>
+                    <Text
+                      style={{
+                        textDecorationLine: 'line-through',
+                        color: c.textFaint,
+                        fontSize: 11,
+                      }}>
+                      {rawPrice}
+                    </Text>
+                    {'  '}
+                    {price.label}
+                    <Text style={{color: c.danger, fontWeight: '900'}}>
+                      {'  -'}
+                      {item.discountPct}%
+                    </Text>
+                  </Text>
+                ) : (
+                  `${price.label}${price.plus ? '+' : ''}${weighted ? '/كغ' : ''}`
+                )}
+              </Text>
+              {item.stockUntracked ? null : (
+                <>
+                  <View
+                    style={[styles.stockDot, {backgroundColor: stockColor}]}
+                  />
+                  <Text style={styles.stockText}>{stockLabel}</Text>
+                </>
+              )}
+              {item.barcode ? (
+                <Icon name="barcode" size={11} color={c.textFaint} />
+              ) : null}
+            </View>
+          </View>
+          {weighted ? (
+            <View style={styles.weightBadge}>
+              <Icon name="scale" size={9} color={c.onAccent} />
+            </View>
+          ) : null}
+        </Pressable>
+      );
+    }
+
+    if (productView === 'cards') {
+      return (
+        <Pressable
+          style={[styles.cardTile, {width: CARD_TILE}, out ? {opacity: 0.55} : null]}
+          onPress={() => openSaleSheet(item)}>
+          <View style={{width: '100%'}}>
+            <ProductThumb product={item} height={Math.round(CARD_TILE * 0.72)} big />
+          </View>
+          {weighted ? (
+            <View style={styles.weightBadge}>
+              <Icon name="scale" size={9} color={c.onAccent} />
+            </View>
+          ) : null}
+          <Text style={styles.cardName} numberOfLines={1}>
+            {item.name}
+          </Text>
+          <Text style={styles.cardPrice}>
+            {hasDiscount ? (
+              <Text>
+                <Text
+                  style={{
+                    textDecorationLine: 'line-through',
+                    color: c.textFaint,
+                    fontSize: 11,
+                  }}>
+                  {rawPrice}
+                </Text>
+                {'  '}
+                {price.label}
+                <Text style={{color: c.danger, fontWeight: '900'}}>
+                  {'  -'}
+                  {item.discountPct}%
+                </Text>
+              </Text>
+            ) : (
+              `${price.label}${price.plus ? '+' : ''}${weighted ? '/كغ' : ''}`
+            )}
+          </Text>
+          <View style={styles.stockRow}>
+            {item.stockUntracked ? (
+              <Text style={styles.stockText}>{stockLabel}</Text>
+            ) : (
+              <>
+                <View
+                  style={[styles.stockDot, {backgroundColor: stockColor}]}
+                />
+                <Text style={styles.stockText}>{stockLabel}</Text>
+              </>
+            )}
+            {item.barcode ? (
+              <Icon name="barcode" size={11} color={c.textFaint} />
+            ) : null}
+          </View>
+        </Pressable>
+      );
+    }
+
+    // الشبكة الافتراضية — بلاطات نقطة البيع.
+    return (
+      <Pressable
+        style={[styles.tile, {width: GRID_TILE}, out ? {opacity: 0.55} : null]}
+        onPress={() => openSaleSheet(item)}>
+        <View style={{width: '100%'}}>
+          <ProductThumb product={item} height={Math.round(GRID_TILE * 0.58)} />
+        </View>
+        {weighted ? (
+          <View style={styles.weightBadge}>
+            <Icon name="scale" size={9} color={c.onAccent} />
+          </View>
+        ) : null}
+        {hasDiscount ? (
+          <View style={styles.discountBadge}>
+            <Text style={styles.discountBadgeText}>-{item.discountPct}%</Text>
+          </View>
+        ) : null}
+        <Text style={styles.tileName} numberOfLines={2}>
+          {item.name}
+        </Text>
+        <Text style={styles.tilePrice} numberOfLines={1}>
+          {hasDiscount ? (
+            <Text>
+              <Text
+                style={{
+                  textDecorationLine: 'line-through',
+                  color: c.textFaint,
+                  fontSize: 10.5,
+                }}>
+                {rawPrice}
+              </Text>
+              {'  '}
+              {price.label}
+              <Text style={{color: c.danger, fontWeight: '900'}}>
+                {'  -'}
+                {item.discountPct}%
+              </Text>
+            </Text>
+          ) : (
+            `${price.label}${price.plus ? '+' : ''}${weighted ? '/كغ' : ''}`
+          )}
+        </Text>
+        <View style={styles.stockRow}>
+          {item.stockUntracked ? (
+            <Text style={styles.stockText}>{stockLabel}</Text>
+          ) : (
+            <>
+              <View
+                style={[styles.stockDot, {backgroundColor: stockColor}]}
+              />
+              <Text style={styles.stockText}>{stockLabel}</Text>
+            </>
+          )}
+          {item.barcode ? (
+            <Icon name="barcode" size={11} color={c.textFaint} />
+          ) : null}
+        </View>
+      </Pressable>
+    );
+  };
+
+  const cartHidden = searchFocused || cartMinimized;
 
   return (
     <View style={styles.screen}>
-      {/* البحث بزر المسح + زر التحديث */}
+      {/* ── زر المسح + البحث (زر المسح أولاً في RTL → أقصى اليمين) ── */}
       <View style={styles.searchRow}>
-        <View style={{flex: 1}}>
-          <SearchBar
-            value={search}
-            onChangeText={setSearch}
-            placeholder="ابحث بالاسم أو امسح الباركود…"
-          />
-        </View>
         <Pressable
-          style={styles.refreshBtn}
-          onPress={() => void refreshCatalog()}>
-          <Icon
-            name="refresh"
-            size={18}
-            color={loading ? c.textFaint : c.accent}
-          />
+          style={[styles.scanButton, scanBusy ? {opacity: 0.6} : null]}
+          onPress={() => void openScanner()}
+          disabled={scanBusy}>
+          <Icon name="barcode" size={19} color={c.onAccent} />
+          <Text style={styles.scanButtonText}>مسح</Text>
         </Pressable>
+        <View style={{flex: 1}}>
+          <Pressable
+            style={[
+              styles.searchBox,
+              search.length > 0 ? {borderColor: c.accent} : null,
+            ]}
+            onPress={() => searchRef.current?.focus()}>
+            <Icon name="search" size={15} color={c.textFaint} />
+            <TextInput
+              ref={searchRef}
+              style={styles.searchInput}
+              value={search}
+              onChangeText={setSearch}
+              placeholder="ابحث بالاسم أو الباركود…"
+              placeholderTextColor={c.textFaint}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              returnKeyType="search"
+            />
+            {search.length > 0 ? (
+              <Pressable
+                onPress={() => setSearch('')}
+                hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                <Icon name="x" size={14} color={c.textDim} />
+              </Pressable>
+            ) : null}
+          </Pressable>
+        </View>
       </View>
 
-      {/* التصنيفات */}
-      {categories.length > 0 ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.catsRow}
-          style={{flexGrow: 0}}>
-          <Pressable
-            style={[styles.catChip, category === 'all' ? styles.catChipActive : null]}
-            onPress={() => setCategory('all')}>
-            <Text
-              style={[
-                styles.catText,
-                category === 'all' ? {color: c.accent} : null,
-              ]}>
-              الكل
-            </Text>
-          </Pressable>
-          {categories.map(item => (
-            <Pressable
-              key={item.id}
-              style={[
-                styles.catChip,
-                category === item.id ? styles.catChipActive : null,
-              ]}
-              onPress={() => setCategory(item.id)}>
-              <Text
-                style={[
-                  styles.catText,
-                  category === item.id ? {color: c.accent} : null,
-                ]}>
-                {item.name}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
-      ) : null}
-
-      {/* الشبكة */}
-      <FlatList
-        data={visible}
-        keyExtractor={item => String(item.id)}
-        numColumns={3}
-        contentContainerStyle={{gap: 8, padding: 8, paddingBottom: 16}}
-        columnWrapperStyle={{gap: 8}}
-        refreshControl={
-          <RefreshControl
-            refreshing={loading}
-            onRefresh={() => void refreshCatalog()}
+      {/* ── الشبكة (تختفي عند توسيع السلة) ── */}
+      {!cartExpanded ? (
+        products.length === 0 && !loading ? (
+          <EmptyState
+            icon="box"
+            title="لا منتجات"
+            subtitle="اسحب للتحديث أو انتظر مزامنة الكتالوج من نقطة البيع"
           />
-        }
-        renderItem={({item}) => {
-          const out =
-            !item.stockUntracked &&
-            availableStock(item, null, null) <= 0 &&
-            item.variants.every(v => v.stockQty <= 0);
-          return (
-            <Pressable
-              style={({pressed}) => [
-                styles.tile,
-                pressed ? {opacity: 0.85, transform: [{scale: 0.98}]} : null,
-              ]}
-              onPress={() => tryAdd(item)}>
-              <ProductThumb product={item} />
-              <Text style={styles.tileName} numberOfLines={2}>
-                {String(item.name ?? '')}
-              </Text>
-              <Text style={styles.tilePrice}>
-                {formatMoney(
-                  item.hasVariants && item.variants.length > 0
-                    ? variantPrice(
-                        item,
-                        item.variants[0],
-                      )
-                    : linePrice(item, null),
-                )}
-                {item.hasVariants && item.variants.length > 0 ? '+' : ''}
-              </Text>
-              {item.units.length > 0 ? (
-                <Text style={styles.tileUnits} numberOfLines={1}>
-                  {item.units.map(u => u.short).join(' · ')}
-                </Text>
-              ) : null}
-              {item.discountPct > 0 && !item.hasVariants ? (
-                <View style={styles.tileBadge}>
-                  <Text style={styles.tileBadgeText}>-{item.discountPct}%</Text>
-                </View>
-              ) : null}
-              {out ? (
-                <View style={styles.tileOut}>
-                  <Text style={styles.tileOutText}>نفد</Text>
-                </View>
-              ) : null}
-            </Pressable>
-          );
-        }}
-        ListEmptyComponent={
-          !loading ? (
-            <EmptyState
-              icon="box"
-              title="لا منتجات"
-              subtitle={
-                products.length === 0
-                  ? 'اسحب للتحديث أو انتظر مزامنة الكتالوج من نقطة البيع'
-                  : 'لا نتائج مطابقة لهذا البحث أو التصنيف'
-              }
-            />
-          ) : null
-        }
-        style={{flex: 1}}
-      />
-
-      {/* السلة */}
-      {cart.lines.length > 0 ? (
-        <View style={styles.cartPanel}>
-          <View style={styles.cartHead}>
-            <Text style={styles.cartTitle}>
-              السلة · {cart.count()} صنف · {formatMoney(cart.subtotal())}
-            </Text>
-            <Pressable onPress={() => cart.clear()} hitSlop={8}>
-              <Text style={styles.cartClear}>تفريغ</Text>
-            </Pressable>
-          </View>
-          <ScrollView style={{maxHeight: 140}} contentContainerStyle={{gap: 6}}>
-            {cart.lines.map(line => (
-              <View key={line.key} style={styles.cartRow}>
-                <View style={{flex: 1}}>
-                  <Text style={styles.cartLineName} numberOfLines={1}>
-                    {line.product.name}
-                    {line.variantLabel ? ` (${line.variantLabel})` : ''}
-                    {line.unitId != null ? ` (${line.unitName})` : ''}
-                  </Text>
-                  <Text style={styles.cartLineMeta}>
-                    {formatQty(line.quantity)} × {formatMoney(line.unitPrice)}{' '}
-                    = {formatMoney(line.unitPrice * line.quantity)}
-                  </Text>
-                </View>
-                <View style={styles.qtyRow}>
-                  <Pressable
-                    style={styles.qtyBtn}
-                    onPress={() =>
-                      cart.setQuantity(line.key, line.quantity + 1)
-                    }>
-                    <Text style={styles.qtyBtnText}>+</Text>
-                  </Pressable>
-                  <Text style={styles.qtyValue}>
-                    {formatQty(line.quantity)}
-                  </Text>
-                  <Pressable
-                    style={styles.qtyBtn}
-                    onPress={() =>
-                      cart.setQuantity(line.key, line.quantity - 1)
-                    }>
-                    <Text style={styles.qtyBtnText}>−</Text>
-                  </Pressable>
-                </View>
-              </View>
-            ))}
-          </ScrollView>
-          <View style={styles.discountRow}>
-            <Text style={styles.discountLabel}>خصم (₪):</Text>
-            <TextInput
-              style={styles.discountInput}
-              value={discountText}
-              onChangeText={text => {
-                setDiscountText(text);
-                const value = Number(text.replace(',', '.')) || 0;
-                cart.setDiscount(Math.min(value, maxDiscountMoney));
-              }}
-              keyboardType="decimal-pad"
-              placeholder="0"
-              placeholderTextColor={c.textFaint}
-            />
-            {perms.maxDiscountPct > 0 ? (
-              <Text style={styles.discountCap}>حتى {formatMoney(maxDiscountMoney)}</Text>
-            ) : null}
-            <Text style={styles.totalText}>{formatMoney(cart.total())}</Text>
-          </View>
-          <View style={styles.checkoutRow}>
-            <AppButton
-              title="بيع نقدي"
-              variant="success"
-              icon="cart"
-              style={{flex: 1}}
-              onPress={() => void completeSale('cash')}
-              loading={busy && online}
-              disabled={busy && online}
-            />
-            {perms.canDebt ? (
-              <AppButton
-                title="بيع بالدين"
-                variant="secondary"
-                icon="book"
-                style={{flex: 1}}
-                onPress={() => setCustomerPicker(true)}
-                disabled={busy}
+        ) : (
+          <FlatList
+            data={visible}
+            keyExtractor={item => `${item.id}-${productView}`}
+            numColumns={productView === 'list' ? 1 : productView === 'cards' ? CARD_COLUMNS : GRID_COLUMNS}
+            key={productView}
+            contentContainerStyle={{
+              gap: GRID_GAP,
+              paddingHorizontal: spacing.md,
+              paddingTop: spacing.sm,
+              paddingBottom: 16,
+            }}
+            columnWrapperStyle={
+              productView === 'list'
+                ? undefined
+                : {gap: GRID_GAP}
+            }
+            refreshControl={
+              <RefreshControl
+                refreshing={loading}
+                onRefresh={() => void refreshCatalog()}
               />
-            ) : null}
-          </View>
-        </View>
-      ) : null}
-
-      {/* نجاح الفاتورة */}
-      {lastInvoice ? (
-        <Modal
-          transparent
-          animationType="fade"
-          onRequestClose={() => setLastInvoice(null)}>
-          <Pressable
-            style={styles.invoiceBackdrop}
-            onPress={() => setLastInvoice(null)}>
-            <View style={styles.invoiceCard}>
-              <View style={styles.invoiceCheckChip}>
-                <Icon name="check" size={30} color={c.success} />
-              </View>
-              <Text style={styles.invoiceNumber}>{lastInvoice.number}</Text>
-              <Text style={styles.invoiceTotal}>
-                {formatMoney(lastInvoice.total)}
-              </Text>
-              {lastInvoice.pendingSync ? (
-                <View style={{alignItems: 'center', gap: 6}}>
-                  <Badge label="بانتظار المزامنة" tone="warning" />
-                  <Text style={styles.invoiceHint}>
-                    سُجِّلت على جهازك ({cashierName}) — تُرفع لنقطة البيع
-                    باسمك فور عودة الاتصال، وساعتها يصدر رقمها الرسمي
-                    تلقائياً دون أي تعارض مع بقية الكاشيرين.
-                  </Text>
+            }
+            renderItem={renderProduct}
+            ListEmptyComponent={
+              !loading ? (
+                <View style={{paddingTop: spacing.xl}}>
+                  <EmptyState
+                    icon="search"
+                    title="لا نتائج"
+                    subtitle={`لا منتج يطابق «${search}»`}
+                  />
                 </View>
-              ) : (
-                <Text style={styles.invoiceHint}>
-                  سُجِّلت في نقطة البيع باسمك — الخزينة والمخزون والديون
-                  تحدّثت فوراً.
-                </Text>
-              )}
-            </View>
-          </Pressable>
-        </Modal>
+              ) : null
+            }
+            style={{flex: 1}}
+            keyboardShouldPersistTaps="handled"
+          />
+        )
       ) : null}
 
-      {sellProduct ? (
-        <SellProductSheet
-          product={sellProduct}
-          onClose={() => setSellProduct(null)}
-          onAdd={(unitId, quantity, variantId) =>
-            cart.add(sellProduct, unitId, quantity, variantId)
-          }
+      {/* ── السلة (نمط نقطة البيع) ── */}
+      {cartHidden ? (
+        cart.lines.length > 0 ? (
+          <Pressable
+            style={styles.cartPeek}
+            onPress={() => {
+              setSearchFocused(false);
+              setCartMinimized(false);
+              searchRef.current?.blur();
+            }}>
+            <Icon name="cart" size={15} color={c.accent} />
+            <Text style={styles.cartPeekText} numberOfLines={1}>
+              السلة: {formatQty(itemsCount)} وحدة · {formatMoney(cart.total())}
+            </Text>
+            <Text style={styles.cartPeekHint}>إظهار السلة</Text>
+          </Pressable>
+        ) : null
+      ) : (
+        <View style={cartExpanded ? styles.cartPanelExpanded : styles.cartPanel}>
+          {cart.lines.length === 0 ? (
+            <Pressable
+              style={styles.cartEmptyRow}
+              onPress={() =>
+                toast(
+                  'السلة فارغة — المس منتجاً من الشبكة بالأعلى، أو استخدم زر المسح بجانب البحث',
+                  'info',
+                )
+              }>
+              <Icon name="cart" size={18} color={c.textFaint} />
+              <Text style={styles.cartEmptyText}>
+                السلة فارغة — المس منتجاً من الشبكة أو امسحه بالباركود
+              </Text>
+            </Pressable>
+          ) : (
+            <>
+              <View style={styles.cartHeaderRow}>
+                <View style={styles.cartSizeBtns}>
+                  <Pressable
+                    style={[
+                      styles.cartSizeBtn,
+                      cartExpanded ? {borderColor: c.accent} : null,
+                    ]}
+                    onPress={() => setCartExpanded(value => !value)}
+                    hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                    <View
+                      style={{
+                        transform: [
+                          {rotate: cartExpanded ? '0deg' : '180deg'},
+                        ],
+                      }}>
+                      <Icon
+                        name="chevronDown"
+                        size={15}
+                        color={cartExpanded ? c.accent : c.textDim}
+                      />
+                    </View>
+                  </Pressable>
+                  <Pressable
+                    style={styles.cartSizeBtn}
+                    onPress={() => {
+                      setCartExpanded(false);
+                      setCartMinimized(true);
+                    }}
+                    hitSlop={{top: 6, bottom: 6, left: 4, right: 4}}>
+                    <Icon name="minus" size={15} color={c.textDim} />
+                  </Pressable>
+                </View>
+                <View style={styles.cartHeaderTitle}>
+                  <Icon name="cart" size={14} color={c.accent} />
+                  <Text style={styles.cartHeaderText}>سلة البيع</Text>
+                  <Badge label={String(itemsCount)} tone="neutral" />
+                </View>
+                <Pressable
+                  style={styles.clearCartBtn}
+                  onPress={() => {
+                    cart.clear();
+                    setDiscountText('');
+                  }}
+                  hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                  <Icon name="trash" size={14} color={c.danger} />
+                  <Text style={styles.clearCartText}>تفريغ</Text>
+                </Pressable>
+              </View>
+
+              <View
+                style={
+                  cartExpanded ? styles.cartLinesWrapExpanded : styles.cartLinesWrap
+                }>
+                <ScrollView showsVerticalScrollIndicator={false}>
+                  {cart.lines.map(line => (
+                    <View key={line.key} style={styles.cartLine}>
+                      <View style={styles.cartLineInfo}>
+                        <Text style={styles.cartLineName} numberOfLines={1}>
+                          {line.product.name}
+                        </Text>
+                        <View style={styles.cartLineMetaRow}>
+                          <Text style={styles.cartLineMeta} numberOfLines={1}>
+                            {line.product.discountPct > 0 ? (
+                              <Text
+                                style={{
+                                  textDecorationLine: 'line-through',
+                                  color: c.textFaint,
+                                  fontSize: 11,
+                                }}>
+                                {formatMoney(line.product.retailPrice)}
+                                {'  '}
+                              </Text>
+                            ) : null}
+                            {formatMoney(line.unitPrice)} ×{' '}
+                            {formatQty(line.quantity)} ={' '}
+                            {formatMoney(line.unitPrice * line.quantity)}
+                          </Text>
+                          {line.variantLabel != null ? (
+                            <View style={styles.variantChip}>
+                              <Icon name="tag" size={10} color={c.accent} />
+                              <Text
+                                style={styles.variantChipText}
+                                numberOfLines={1}>
+                                {line.variantLabel}
+                              </Text>
+                            </View>
+                          ) : line.byWeight ? (
+                            <View style={styles.variantChip}>
+                              <Icon name="scale" size={10} color={c.accent} />
+                              <Text style={styles.variantChipText}>وزن</Text>
+                            </View>
+                          ) : line.unitId != null ? (
+                            <View style={styles.variantChip}>
+                              <Icon name="scale" size={10} color={c.accent} />
+                              <Text
+                                style={styles.variantChipText}
+                                numberOfLines={1}>
+                                {line.unitName}
+                              </Text>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                      <View style={styles.stepperRow}>
+                        <Pressable
+                          style={styles.stepBtn}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                          onPress={() => {
+                            const result = cart.setQuantity(
+                              line.key,
+                              Math.round((line.quantity + 1) * 1000) / 1000,
+                            );
+                            if (!result.ok && result.reason) {
+                              toast(result.reason, 'error');
+                            }
+                          }}>
+                          <Icon name="plus" size={13} color={c.text} />
+                        </Pressable>
+                        <Text style={styles.stepValue}>
+                          {formatQty(line.quantity)}
+                        </Text>
+                        <Pressable
+                          style={styles.stepBtn}
+                          hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
+                          onPress={() =>
+                            cart.setQuantity(
+                              line.key,
+                              Math.round((line.quantity - 1) * 1000) / 1000,
+                            )
+                          }>
+                          <Icon name="minus" size={13} color={c.text} />
+                        </Pressable>
+                      </View>
+                      <Pressable
+                        onPress={() => cart.removeLine(line.key)}
+                        style={styles.removeBtn}
+                        hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}>
+                        <Icon name="trash" size={13} color={c.danger} />
+                      </Pressable>
+                    </View>
+                  ))}
+                </ScrollView>
+              </View>
+
+              <View style={styles.discountRow}>
+                <Text style={styles.discountLabel}>خصم (₪)</Text>
+                <TextInput
+                  style={styles.discountInput}
+                  value={discountText}
+                  onChangeText={text => {
+                    setDiscountText(text);
+                    const value = Number(text.replace(',', '.')) || 0;
+                    cart.setDiscount(Math.min(value, maxDiscountMoney));
+                  }}
+                  keyboardType="numeric"
+                  placeholder="0"
+                  placeholderTextColor={c.textFaint}
+                />
+                <Pressable
+                  style={styles.quickChip}
+                  onPress={() => {
+                    const next = cart.subtotal() * 0.05;
+                    cart.setDiscount(Math.min(next, maxDiscountMoney));
+                    setDiscountText(
+                      String(
+                        Math.round(
+                          Math.min(next, maxDiscountMoney) * 100,
+                        ) / 100,
+                      ),
+                    );
+                  }}>
+                  <Text style={styles.quickChipText}>5%</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.quickChip}
+                  onPress={() => {
+                    const next = cart.subtotal() * 0.1;
+                    cart.setDiscount(Math.min(next, maxDiscountMoney));
+                    setDiscountText(
+                      String(
+                        Math.round(
+                          Math.min(next, maxDiscountMoney) * 100,
+                        ) / 100,
+                      ),
+                    );
+                  }}>
+                  <Text style={styles.quickChipText}>10%</Text>
+                </Pressable>
+                <Text style={styles.totalText}>{formatMoney(cart.total())}</Text>
+              </View>
+
+              <View style={styles.checkoutRow}>
+                <AppButton
+                  title="بيع نقدي"
+                  variant="success"
+                  icon="cart"
+                  style={{flex: 1.4}}
+                  onPress={() => void completeSale('cash')}
+                  loading={busy && online}
+                  disabled={busy && online}
+                />
+                {perms.canDebt ? (
+                  <AppButton
+                    title="بيع بالدين"
+                    variant="secondary"
+                    icon="book"
+                    style={{flex: 1}}
+                    onPress={() => setCustomerPicker(true)}
+                    disabled={busy}
+                  />
+                ) : null}
+              </View>
+              {pending > 0 ? (
+                <Text style={styles.pendingHint}>
+                  {pending} عملية بانتظار المزامنة — البيع يعمل محلياً
+                </Text>
+              ) : null}
+            </>
+          )}
+        </View>
+      )}
+
+      {/* نوافذ INLINE فوق كل شيء */}
+      {saleProduct ? (
+        <SaleSheet
+          product={saleProduct}
+          onClose={() => setSaleProduct(null)}
+          onAdd={(product, unitId, quantity, variantId) => {
+            const result = cart.add(product, unitId, quantity, variantId);
+            if (!result.ok && result.reason) {
+              toast(result.reason, 'error');
+            }
+          }}
+        />
+      ) : null}
+      {weightProduct ? (
+        <WeightSheet
+          product={weightProduct}
+          onClose={() => setWeightProduct(null)}
+          onConfirm={(product, kg) => {
+            const result = cart.add(product, null, kg, null);
+            if (!result.ok && result.reason) {
+              toast(result.reason, 'error');
+              return;
+            }
+            setWeightProduct(null);
+          }}
         />
       ) : null}
       {customerPicker ? (
@@ -979,14 +1673,224 @@ export function SellScreen() {
           onPick={customer => void completeSale('debt', customer.id)}
         />
       ) : null}
+
+      {/* نجاح الفاتورة */}
+      {lastInvoice ? (
+        <Pressable
+          style={styles.invoiceBackdrop}
+          onPress={() => setLastInvoice(null)}>
+          <View style={styles.invoiceCard}>
+            <View style={styles.invoiceCheckChip}>
+              <Icon name="check" size={30} color={c.success} />
+            </View>
+            <Text style={styles.invoiceNumber}>{lastInvoice.number}</Text>
+            <Text style={styles.invoiceTotal}>
+              {formatMoney(lastInvoice.total)}
+            </Text>
+            {lastInvoice.printed ? (
+              <Badge label="طُبعت من طابعة نقطة البيع" tone="info" />
+            ) : null}
+            {lastInvoice.pendingSync ? (
+              <View style={{alignItems: 'center', gap: 6}}>
+                <Badge label="بانتظار المزامنة" tone="warning" />
+                <Text style={styles.invoiceHint}>
+                  سُجِّلت على جهازك ({cashierName}) — تُرفع لنقطة البيع
+                  باسمك فور عودة الاتصال، وساعتها يصدر رقمها الرسمي
+                  تلقائياً دون أي تعارض مع بقية الكاشيرين.
+                </Text>
+              </View>
+            ) : (
+              <Text style={styles.invoiceHint}>
+                سُجِّلت في نقطة البيع باسمك — الخزينة والمخزون والديون
+                تحدّثت فوراً.
+              </Text>
+            )}
+            <AppButton
+              title="فاتورة جديدة"
+              icon="plus"
+              small
+              onPress={() => setLastInvoice(null)}
+            />
+          </View>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
 
 // ── الأنماط ──────────────────────────────────────────────────────
-const useSheetStyles = makeStyles(c =>
+const useWeightSheetStyles = makeStyles(c =>
   ({
-    metaRow: {flexDirection: 'row', flexWrap: 'wrap', gap: 6},
+    overlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 40,
+      elevation: 40,
+      justifyContent: 'flex-end',
+    },
+    dim: {flex: 1, backgroundColor: c.overlay},
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    title: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'right',
+      flexShrink: 1,
+    },
+    kiloPrice: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+    },
+    clearChip: {
+      backgroundColor: c.surfaceHi,
+      borderRadius: 999,
+      paddingHorizontal: 14,
+      paddingVertical: 7,
+    },
+    clearText: {
+      color: c.danger,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+    },
+    displayRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+      backgroundColor: c.surfaceAlt,
+      borderRadius: 14,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 10,
+    },
+    display: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 30,
+      flexShrink: 1,
+    },
+    displayUnit: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
+    },
+    displayTotal: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      flex: 1,
+      textAlign: 'left',
+    },
+    padRow: {
+      flexDirection: 'row',
+      gap: spacing.md,
+    },
+    keypad: {flex: 1, gap: 7},
+    keypadRow: {flexDirection: 'row', gap: 7},
+    keypadKey: {
+      flex: 1,
+      height: 46,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    keypadKeyDanger: {backgroundColor: c.dangerSoft, borderColor: c.dangerSoft},
+    keypadKeyText: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 19,
+    },
+    quickColumn: {width: 128, gap: 6},
+    quickLabel: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+      textAlign: 'right',
+    },
+    quickChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 11,
+      paddingHorizontal: 10,
+      paddingVertical: 7,
+      gap: 1,
+    },
+    quickValue: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
+      textAlign: 'right',
+    },
+    quickName: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      textAlign: 'right',
+    },
+    actionRow: {flexDirection: 'row', gap: spacing.sm},
+  }) as const,
+);
+
+const useSaleSheetStyles = makeStyles(c =>
+  ({
+    overlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 40,
+      elevation: 40,
+      justifyContent: 'flex-end',
+    },
+    dim: {flex: 1, backgroundColor: c.overlay},
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    title: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'right',
+      flexShrink: 1,
+    },
+    sub: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+    },
+    closeBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 10,
+      backgroundColor: c.surfaceHi,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
     group: {gap: 8},
     groupTitle: {
       color: c.textDim,
@@ -1017,26 +1921,93 @@ const useSheetStyles = makeStyles(c =>
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
     },
-    totalLine: {
-      color: c.accent,
+    qtyRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+    },
+    qtyBtn: {
+      width: 40,
+      height: 40,
+      borderRadius: 12,
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    qtyValue: {
+      color: c.text,
       fontFamily: fonts.black,
-      fontSize: typography.body,
-      textAlign: 'right',
+      fontSize: typography.heading,
+      minWidth: 52,
+      textAlign: 'center',
+    },
+    miniChips: {flexDirection: 'row', gap: 6, flex: 1},
+    miniChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+    },
+    miniChipActive: {borderColor: c.accent},
+    miniChipText: {
+      color: c.textDim,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
     },
   }) as const,
 );
 
 const useCustomerStyles = makeStyles(c =>
   ({
-    dim: {
+    overlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 40,
+      elevation: 40,
+      justifyContent: 'flex-end',
+    },
+    dim: {flex: 1, backgroundColor: c.overlay},
+    sheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    headerRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: spacing.sm,
+    },
+    title: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: typography.heading,
+      textAlign: 'right',
+      flexShrink: 1,
+    },
+    sub: {
       color: c.textDim,
       fontFamily: fonts.regular,
       fontSize: typography.small,
       textAlign: 'right',
       lineHeight: 19,
     },
-    row: {
+    closeBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 10,
       backgroundColor: c.surfaceHi,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    row: {
+      backgroundColor: c.surfaceAlt,
       borderRadius: 12,
       padding: spacing.md,
       flexDirection: 'row',
@@ -1049,6 +2020,12 @@ const useCustomerStyles = makeStyles(c =>
       fontSize: typography.body,
       textAlign: 'right',
     },
+    dimText: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: typography.small,
+      textAlign: 'right',
+    },
   }) as const,
 );
 
@@ -1058,90 +2035,174 @@ const useStyles = makeStyles(c =>
     searchRow: {
       flexDirection: 'row',
       gap: 8,
-      padding: 8,
-      paddingBottom: 4,
+      paddingHorizontal: spacing.md,
+      paddingTop: spacing.sm + 2,
+      paddingBottom: spacing.sm,
       alignItems: 'center',
     },
-    refreshBtn: {
-      width: 46,
-      height: 46,
+    scanButton: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      backgroundColor: c.accent,
       borderRadius: 13,
-      backgroundColor: c.surface,
-      borderWidth: 1,
-      borderColor: c.border,
+      paddingHorizontal: 14,
+      height: 46,
+    },
+    scanButtonText: {
+      color: c.onAccent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+    },
+    searchBox: {
+      flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'center',
-    },
-    catsRow: {gap: 6, paddingHorizontal: 8, paddingBottom: 8},
-    catChip: {
+      gap: 8,
       backgroundColor: c.surface,
       borderWidth: 1,
       borderColor: c.border,
-      borderRadius: 999,
+      borderRadius: 13,
+      height: 46,
       paddingHorizontal: 12,
-      paddingVertical: 6,
     },
-    catChipActive: {borderColor: c.accent, backgroundColor: c.accentSofter},
-    catText: {
-      color: c.textDim,
-      fontFamily: fonts.medium,
-      fontSize: typography.small,
-    },
-    tile: {
+    searchInput: {
       flex: 1,
+      color: c.text,
+      fontFamily: fonts.regular,
+      fontSize: typography.body,
+      padding: 0,
+      textAlign: I18nManager.isRTL ? 'right' : 'left',
+    },
+    // ── بلاطة الشبكة ──
+    tile: {
       backgroundColor: c.surface,
       borderRadius: 14,
       borderWidth: 1,
       borderColor: c.borderSoft,
-      padding: 8,
+      padding: 7,
       gap: 4,
+      alignItems: 'center',
     },
     tileName: {
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.small,
       textAlign: 'center',
-      minHeight: 30,
+      minHeight: 28,
     },
     tilePrice: {
       color: c.accent,
       fontFamily: fonts.black,
-      fontSize: typography.body,
+      fontSize: typography.body - 1,
       textAlign: 'center',
     },
-    tileUnits: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro,
-      textAlign: 'center',
-    },
-    tileBadge: {
+    discountBadge: {
       position: 'absolute',
-      top: 6,
-      right: 6,
-      backgroundColor: c.accentSoft,
-      borderRadius: 7,
-      paddingHorizontal: 6,
-      paddingVertical: 2,
-    },
-    tileBadgeText: {
-      color: c.accent,
-      fontFamily: fonts.bold,
-      fontSize: typography.micro,
-    },
-    tileOut: {
-      position: 'absolute',
-      top: 6,
-      left: 6,
+      top: 10,
+      left: 10,
       backgroundColor: c.dangerSoft,
       borderRadius: 7,
       paddingHorizontal: 6,
       paddingVertical: 2,
     },
-    tileOutText: {
+    discountBadgeText: {
       color: c.danger,
       fontFamily: fonts.bold,
       fontSize: typography.micro,
+    },
+    weightBadge: {
+      position: 'absolute',
+      top: 10,
+      right: 10,
+      width: 22,
+      height: 22,
+      borderRadius: 999,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    stockRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 4,
+    },
+    stockDot: {width: 7, height: 7, borderRadius: 999},
+    stockText: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
+      flexShrink: 1,
+    },
+    // ── صف القائمة ──
+    listRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 10,
+      backgroundColor: c.surface,
+      borderRadius: 13,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: 9,
+    },
+    listName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+      textAlign: 'right',
+    },
+    listMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+    },
+    listPrice: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.small + 1,
+    },
+    // ── البطاقة الكبيرة ──
+    cardTile: {
+      backgroundColor: c.surface,
+      borderRadius: 16,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: 8,
+      gap: 4,
+    },
+    cardName: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+      textAlign: 'right',
+    },
+    cardPrice: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.body,
+      textAlign: 'right',
+    },
+    // ── السلة ──
+    cartPeek: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+      backgroundColor: c.surface,
+      borderTopWidth: 1,
+      borderTopColor: c.borderSoft,
+      paddingHorizontal: spacing.md,
+      paddingVertical: 11,
+    },
+    cartPeekText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.body - 1,
+      flex: 1,
+      flexShrink: 1,
+    },
+    cartPeekHint: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.small,
     },
     cartPanel: {
       backgroundColor: c.surface,
@@ -1152,44 +2213,109 @@ const useStyles = makeStyles(c =>
       padding: spacing.md,
       gap: 8,
     },
-    cartHead: {
+    cartPanelExpanded: {
+      flex: 1,
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 20,
+      borderTopRightRadius: 20,
+      borderWidth: 1,
+      borderColor: c.border,
+      padding: spacing.md,
+      gap: 8,
+    },
+    cartEmptyRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      justifyContent: 'space-between',
+      gap: 10,
+      paddingVertical: 16,
+      justifyContent: 'center',
     },
-    cartTitle: {
+    cartEmptyText: {
+      color: c.textFaint,
+      fontFamily: fonts.medium,
+      fontSize: typography.small,
+      flexShrink: 1,
+    },
+    cartHeaderRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 8,
+    },
+    cartSizeBtns: {flexDirection: 'row', gap: 6},
+    cartSizeBtn: {
+      width: 32,
+      height: 32,
+      borderRadius: 10,
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    cartHeaderTitle: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      flex: 1,
+      justifyContent: 'center',
+    },
+    cartHeaderText: {
       color: c.text,
       fontFamily: fonts.black,
       fontSize: typography.body,
-      textAlign: 'right',
     },
-    cartClear: {
+    clearCartBtn: {flexDirection: 'row', alignItems: 'center', gap: 4},
+    clearCartText: {
       color: c.danger,
       fontFamily: fonts.medium,
       fontSize: typography.small,
     },
-    cartRow: {
+    cartLinesWrap: {maxHeight: 168},
+    cartLinesWrapExpanded: {flex: 1, minHeight: 120},
+    cartLine: {
       flexDirection: 'row',
       alignItems: 'center',
       gap: 8,
       backgroundColor: c.surfaceAlt,
-      borderRadius: 10,
+      borderRadius: 11,
       padding: 8,
+      marginBottom: 6,
     },
+    cartLineInfo: {flex: 1, minWidth: 0, gap: 3},
     cartLineName: {
       color: c.text,
       fontFamily: fonts.medium,
-      fontSize: typography.small,
+      fontSize: typography.small + 1,
       textAlign: 'right',
+    },
+    cartLineMetaRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
     },
     cartLineMeta: {
       color: c.textDim,
       fontFamily: fonts.regular,
       fontSize: typography.micro + 1,
       textAlign: 'right',
+      flexShrink: 1,
     },
-    qtyRow: {flexDirection: 'row', alignItems: 'center', gap: 8},
-    qtyBtn: {
+    variantChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 3,
+      backgroundColor: c.accentSofter,
+      borderRadius: 999,
+      paddingHorizontal: 7,
+      paddingVertical: 2,
+    },
+    variantChipText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro,
+    },
+    stepperRow: {flexDirection: 'row', alignItems: 'center', gap: 7},
+    stepBtn: {
       width: 30,
       height: 30,
       borderRadius: 9,
@@ -1199,14 +2325,14 @@ const useStyles = makeStyles(c =>
       alignItems: 'center',
       justifyContent: 'center',
     },
-    qtyBtnText: {color: c.text, fontSize: 17, fontFamily: fonts.bold},
-    qtyValue: {
+    stepValue: {
       color: c.text,
       fontFamily: fonts.bold,
       fontSize: typography.body,
-      minWidth: 34,
+      minWidth: 40,
       textAlign: 'center',
     },
+    removeBtn: {padding: 4},
     discountRow: {
       flexDirection: 'row',
       alignItems: 'center',
@@ -1216,11 +2342,6 @@ const useStyles = makeStyles(c =>
       color: c.textDim,
       fontFamily: fonts.medium,
       fontSize: typography.small,
-    },
-    discountCap: {
-      color: c.textFaint,
-      fontFamily: fonts.regular,
-      fontSize: typography.micro,
     },
     discountInput: {
       flex: 1,
@@ -1234,18 +2355,39 @@ const useStyles = makeStyles(c =>
       paddingVertical: 7,
       textAlign: 'center',
     },
+    quickChip: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 6,
+    },
+    quickChipText: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: typography.micro + 1,
+    },
     totalText: {
       color: c.accent,
       fontFamily: fonts.black,
       fontSize: typography.heading,
     },
     checkoutRow: {flexDirection: 'row', gap: 8},
+    pendingHint: {
+      color: c.warning,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro + 1,
+      textAlign: 'center',
+    },
     invoiceBackdrop: {
-      flex: 1,
+      ...StyleSheet.absoluteFillObject,
       backgroundColor: c.overlay,
       alignItems: 'center',
       justifyContent: 'center',
       padding: spacing.lg,
+      zIndex: 60,
+      elevation: 60,
     },
     invoiceCard: {
       backgroundColor: c.surface,

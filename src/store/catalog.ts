@@ -287,8 +287,8 @@ interface CartState {
     unitId: number | null,
     quantity: number,
     variantId?: number | null,
-  ) => void;
-  setQuantity: (key: string, quantity: number) => void;
+  ) => CartOpResult;
+  setQuantity: (key: string, quantity: number) => CartOpResult;
   removeLine: (key: string) => void;
   setDiscount: (value: number) => void;
   clear: () => void;
@@ -297,11 +297,29 @@ interface CartState {
   count: () => number;
 }
 
+/** v3.0: نتيجة عملية سلة مقيدة بالمخزون — نفس انضباط نقطة البيع. */
+export interface CartOpResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/** تقريب كمية للعرض في رسائل المخزون (12.500 → 12.5). */
+function qtyForMessage(value: number): string {
+  return String(Math.round(value * 1000) / 1000);
+}
+
 export const useCartStore = create<CartState>((set, get) => ({
   lines: [],
   discount: 0,
 
   add(product, unitId, quantity, variantId = null) {
+    // v3.0 — نفس قواعد نقطة البيع: منتج نفد لا يدخل السلة أبداً
+    // (المحكوم بلا تتبع مخزون يُباع دائماً). الجديد يُجمع مع ما في
+    // السلة من نفس الخط قبل الفحص — فلا يُباع ما نفد مهما تكرر.
+    const guard = stockGuard(get().lines, product, unitId, variantId, quantity);
+    if (guard != null) {
+      return guard;
+    }
     const key = `${product.id}-${unitId ?? ''}-v${variantId ?? ''}`;
     const unit =
       unitId != null ? product.units.find(u => u.id === unitId) : undefined;
@@ -318,7 +336,7 @@ export const useCartStore = create<CartState>((set, get) => ({
             : line,
         ),
       });
-      return;
+      return {ok: true};
     }
     const price = variant ? variantPrice(product, variant) : linePrice(product, unitId);
     set({
@@ -338,18 +356,37 @@ export const useCartStore = create<CartState>((set, get) => ({
         },
       ],
     });
+    return {ok: true};
   },
 
   setQuantity(key, quantity) {
+    const line = get().lines.find(item => item.key === key);
+    if (line == null) {
+      return {ok: false};
+    }
     if (quantity <= 0) {
-      set({lines: get().lines.filter(line => line.key !== key)});
-      return;
+      set({lines: get().lines.filter(item => item.key !== key)});
+      return {ok: true};
+    }
+    // v3.0: التخفيض مسموح دائماً؛ الزيادة تُفحص مقابل المخزون.
+    if (quantity > line.quantity) {
+      const guard = stockGuard(
+        get().lines,
+        line.product,
+        line.unitId,
+        line.variantId,
+        quantity - line.quantity,
+      );
+      if (guard != null) {
+        return guard;
+      }
     }
     set({
-      lines: get().lines.map(line =>
-        line.key === key ? {...line, quantity} : line,
+      lines: get().lines.map(item =>
+        item.key === key ? {...item, quantity} : item,
       ),
     });
+    return {ok: true};
   },
 
   removeLine(key) {
@@ -383,6 +420,119 @@ export const useCartStore = create<CartState>((set, get) => ({
 
 function variantLabelOf(variant: CatalogVariant): string {
   return variantLabel(variant);
+}
+
+/**
+ * v3.0 — حارس المخزون لكل مسارات السلة (إضافة/زيادة):
+ *  • متغير (لون×مقاس/حجم): مجموع كميات نفس المتغير في السلة +
+ *    الجديد لا يتجاوز رصيد المتغير.
+ *  • وحدة (علبة/شريط) أو وزن (كغ): مجموع الوحدات الأساسية في
+ *    السلة + الجديد (معامل التحويل) لا يتجاوز رصيد المنتج.
+ * يعيد نتيجة فشل مع سبب عربي واضح، أو null عند السماح.
+ */
+function stockGuard(
+  lines: CartLine[],
+  product: CatalogProduct,
+  unitId: number | null,
+  variantId: number | null,
+  quantity: number,
+): CartOpResult | null {
+  if (product.stockUntracked) {
+    return null;
+  }
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    return {ok: false, reason: 'كمية غير صالحة'};
+  }
+  if (variantId != null) {
+    const variant = product.variants.find(v => v.id === variantId);
+    if (variant == null) {
+      return {ok: false, reason: 'متغير غير متاح'};
+    }
+    // الأحجام (مطعم/كافيتريا) تُباع من مخزون المنتج نفسه — نفس
+    // قاعدة نقطة البيع (addSizedLine)؛ ملابس لون×مقاس بمخزون
+    // المتغير الخاص به.
+    if (variant.kind === 'size') {
+      const alreadyBase = lines
+        .filter(
+          line =>
+            line.product.id === product.id && line.variantId == null,
+        )
+        .reduce((sum, line) => sum + line.quantity * line.conversion, 0);
+      const stock = Math.max(0, product.stockQty);
+      if (alreadyBase + quantity > stock + 0.0001) {
+        const leftBase = Math.max(0, stock - alreadyBase);
+        if (leftBase <= 0.0001) {
+          return {
+            ok: false,
+            reason: `نفد «${product.name}» من المخزون`,
+          };
+        }
+        return {
+          ok: false,
+          reason: `المتاح من ${product.name} ${qtyForMessage(leftBase)} حبة فقط`,
+        };
+      }
+      return null;
+    }
+    const already = lines
+      .filter(
+        line =>
+          line.product.id === product.id && line.variantId === variantId,
+      )
+      .reduce((sum, line) => sum + line.quantity, 0);
+    if (already + quantity > variant.stockQty + 0.0001) {
+      const left = Math.max(0, variant.stockQty - already);
+      if (left <= 0.0001) {
+        return {
+          ok: false,
+          reason: `نفد «${product.name}» (${variantLabel(variant)}) من المخزون`,
+        };
+      }
+      return {
+        ok: false,
+        reason: `المتاح من ${product.name} (${variantLabel(variant)}) ${qtyForMessage(left)} فقط`,
+      };
+    }
+    return null;
+  }
+  const unit =
+    unitId != null ? product.units.find(u => u.id === unitId) : undefined;
+  const conversion = unit ? unit.conversion : 1;
+  // مجموع الوحدات الأساسية للمنتج في السلة (خطوط بلا متغير).
+  const alreadyBase = lines
+    .filter(line => line.product.id === product.id && line.variantId == null)
+    .reduce((sum, line) => sum + line.quantity * line.conversion, 0);
+  const stock = Math.max(0, product.stockQty);
+  if (alreadyBase + conversion * quantity > stock + 0.0001) {
+    const leftBase = Math.max(0, stock - alreadyBase);
+    if (leftBase <= 0.0001) {
+      return {
+        ok: false,
+        reason: `نفد «${product.name}» من المخزون — لا يُباع حتى يعود للمخزون`,
+      };
+    }
+    const leftInUnit = conversion > 0 ? leftBase / conversion : leftBase;
+    return {
+      ok: false,
+      reason: `المتاح من ${product.name} ${qtyForMessage(leftInUnit)} ${unit ? unit.name : product.byWeight ? 'كغ' : 'حبة'} فقط`,
+    };
+  }
+  return null;
+}
+
+/** هل المنتج قابل للبيع الآن (غير نافد كلياً)؟ — لتعتيم البلاطة.
+ *  الأحجام تُباع من مخزون المنتج؛ ملابس من رصيد متغيراتها. */
+export function sellableNow(product: CatalogProduct): boolean {
+  if (product.stockUntracked) {
+    return true;
+  }
+  if (product.hasVariants) {
+    if (product.stockQty > 0) {
+      return true;
+    }
+    return product.variants.some(v => v.stockQty > 0);
+  }
+  return product.stockQty > 0;
 }
 
 /** تفريغ أي مرجع قديم عند تسجيل الخروج. */

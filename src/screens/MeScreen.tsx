@@ -1,13 +1,15 @@
 /**
- * screens/MeScreen.tsx — v2.0: حسابي — بصلاحياتي وحالة اتصالي.
+ * screens/MeScreen.tsx — v3.0: حسابي — الإعدادات والصلاحيات.
  * ─────────────────────────────────────────────────────────────────
- * ① بطاقة الحساب: اسمي، متجري، صلاحياتي كما منحها المسؤول (سقف
- *    الخصم، الدين، المرتجعات) — أوضح ما يكون.
+ * ① بطاقة الحساب: اسمي، متجري، صلاحياتي كما منحها المسؤول.
  * ② حالة الاتصال بنقطة البيع + العمليات المعلقة + مزامنة فورية.
- * ③ الوضع النهاري/الليلي/تلقائي — نفس نظام نقطة البيع (طلب التاجر).
- * ④ تسجيل الخروج (يبقى الأرشيف المحلي — يُربط بحسابك عند الدخول).
+ * ③ الطباعة (جديد): حالة طابعة نقطة البيع المتصلة + تفعيل/إلغاء
+ *    طباعة الفواتير منها — تُطبع لحظة البيع مباشرة.
+ * ④ الأمان (جديد): الدخول للتطبيق بالبصمة عند الإقلاع.
+ * ⑤ الوضع النهاري/الليلي/تلقائي — نفس نظام نقطة البيع.
+ * ⑥ تسجيل الخروج (يبقى الأرشيف المحلي — يُربط بحسابك عند الدخول).
  */
-import React from 'react';
+import React, {useEffect, useState} from 'react';
 import {ScrollView, Text, View} from 'react-native';
 import {
   AppButton,
@@ -29,7 +31,9 @@ import {
 import {useSessionStore} from '../store/session';
 import {useSyncStore} from '../store/sync';
 import {initOfflineStore, listInvoices} from '../store/offline';
-import {useEffect, useState} from 'react';
+import {useAppSettings} from '../store/settings';
+import {CashierApi} from '../api/client';
+import {biometricAvailability, type BiometricStatus} from '../native';
 
 export function MeScreen() {
   const c = useThemeColors();
@@ -44,7 +48,17 @@ export function MeScreen() {
   const runCycle = useSyncStore(s => s.runCycle);
   const themeMode = useThemeStore(s => s.mode);
   const setThemeMode = useThemeStore(s => s.setMode);
+  const printReceipts = useAppSettings(s => s.printReceipts);
+  const setPrintReceipts = useAppSettings(s => s.setPrintReceipts);
+  const fingerprintLock = useAppSettings(s => s.fingerprintLock);
+  const setFingerprintLock = useAppSettings(s => s.setFingerprintLock);
   const [archiveCount, setArchiveCount] = useState(0);
+  // حالة طابعة نقطة البيع: متصلة أم لا (+ اسمها).
+  const [printer, setPrinter] = useState<{
+    connected: boolean;
+    name: string | null;
+  } | null>(null);
+  const [bio, setBio] = useState<BiometricStatus>('available');
 
   useEffect(() => {
     void (async () => {
@@ -52,6 +66,27 @@ export function MeScreen() {
       const list = await listInvoices(1000);
       setArchiveCount(list.length);
     })();
+  }, []);
+
+  // حالة الطابعة من نقطة البيع كلما فُتحت الشاشة أو عاد الاتصال.
+  useEffect(() => {
+    setPrinter(null);
+    if (!online) {
+      return;
+    }
+    void (async () => {
+      try {
+        const status = await CashierApi.printerStatus();
+        setPrinter({connected: status.connected, name: status.name ?? null});
+      } catch {
+        setPrinter(null);
+      }
+    })();
+  }, [online]);
+
+  // توفر البصمة على هذا الجهاز.
+  useEffect(() => {
+    void biometricAvailability().then(setBio);
   }, []);
 
   return (
@@ -137,10 +172,79 @@ export function MeScreen() {
           onPress={() => void runCycle({force: true})}
         />
         <Text style={styles.dim}>
-          البيع يعمل كاملاً حتى بانقطاع الاتصال: كل عملية تُسجَّل على
-          جهازك برقم مؤقت، وتصدر أرقامها الرسمية من نقطة البيع عند
-          المزامنة — فلا تعارض بين حسابات الكاشيرين إطلاقاً.
+          البيع يعمل كاملاً حتى بانقطاع الاتصال: كل عملية تُسجَّل على جهازك
+          برقم مؤقت، وتصدر أرقامها الرسمية من نقطة البيع عند المزامنة — فلا
+          تعارض بين حسابات الكاشيرين إطلاقاً. وإن تغيّر عنوان نقطة البيع
+          (الراوتر أُعيد تشغيله مثلاً) يبحث التطبيق عنها تلقائياً على
+          الشبكة ويعيد الاتصال بجلستك نفسها.
         </Text>
+      </Card>
+
+      {/* الطباعة — عبر طابعة نقطة البيع المتصلة */}
+      <SectionTitle
+        title="الطباعة"
+        hint="من الطابعة المرتبطة بنقطة البيع — إن وُجدت"
+      />
+      <Card style={{gap: 8}}>
+        <View style={styles.permRow}>
+          <Icon
+            name="printer"
+            size={16}
+            color={printer?.connected ? c.success : c.textFaint}
+          />
+          <Text style={styles.permLabel}>طابعة نقطة البيع</Text>
+          <View style={{flex: 1}} />
+          {printer == null ? (
+            <Badge
+              label={online ? 'جارٍ الفحص…' : 'تُفحص عند الاتصال'}
+              tone="neutral"
+            />
+          ) : printer.connected ? (
+            <Badge
+              label={printer.name ? `متصلة · ${printer.name}` : 'متصلة'}
+              tone="success"
+            />
+          ) : (
+            <Badge label="غير متصلة" tone="neutral" />
+          )}
+        </View>
+        <SwitchRow
+          label="طباعة الفواتير من طابعة نقطة البيع"
+          hint={
+            printer != null && !printer.connected
+              ? 'الطابعة غير متصلة الآن — سيُتجاهل الطلب حتى تتصل'
+              : 'كل فاتورة تُطبع لحظة إتمامها مباشرة من طابعة نقطة البيع'
+          }
+          icon="printer"
+          value={printReceipts}
+          onValueChange={on => setPrintReceipts(on)}
+        />
+      </Card>
+
+      {/* الأمان — الدخول بالبصمة */}
+      <SectionTitle
+        title="الأمان"
+        hint="بوابة الدخول عند فتح التطبيق"
+      />
+      <Card>
+        <SwitchRow
+          label="الدخول للتطبيق بالبصمة"
+          hint={
+            bio === 'available'
+              ? 'عند فتح التطبيق تُطلب بصمتك قبل الدخول لشاشة البيع'
+              : bio === 'none_enrolled'
+              ? 'لا توجد بصمة مسجلة في الجهاز — أضفها من إعدادات الجهاز أولاً'
+              : 'جهازك لا يدعم البصمة'
+          }
+          icon="fingerprint"
+          value={fingerprintLock}
+          onValueChange={on => {
+            if (on && bio !== 'available') {
+              return; // لا يمكن التفعيل بلا بصمة مسجلة.
+            }
+            setFingerprintLock(on);
+          }}
+        />
       </Card>
 
       {/* المظهر */}
@@ -175,7 +279,7 @@ export function MeScreen() {
         variant="danger"
         onPress={() => void signOut()}
       />
-      <Text style={styles.version}>سيلّا كاشير · الإصدار 2.0.0 (2)</Text>
+      <Text style={styles.version}>سيلّا كاشير · الإصدار 3.0.0 (4)</Text>
     </ScrollView>
   );
 }
@@ -225,6 +329,7 @@ const useStyles = makeStyles(c =>
       fontFamily: fonts.medium,
       fontSize: typography.body,
       textAlign: 'right',
+      flexShrink: 1,
     },
     permValue: {
       color: c.accent,

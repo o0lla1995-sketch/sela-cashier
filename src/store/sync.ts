@@ -1,20 +1,28 @@
 /**
- * store/sync.ts — v2.0: محرك المزامنة الفورية.
+ * store/sync.ts — v3.0: محرك المزامنة المستمر مع الاسترداد الذكي.
  * ─────────────────────────────────────────────────────────────────
- * يعمل في الخلفية طوال الجلسة (أهم طلبات التاجر):
- *  ① مراقبة الاتصال — ping كل 6 ثوانٍ (حين تكون هناك عمليات معلقة
- *     أو تحديثات دورية أبطأ عند السكون).
- *  ② عند توفر الاتصال: دفع طابور العمليات المعلقة بالتسلسل (دفعات
- *     من 10) — clientRef يمنع أي ازدواج مهما تكرر الإرسال.
- *  ③ سحب تزايدي لفواتيري من الخادم (since cursor) ودمجها بالأرشيف
- *     المحلي — فتصبح التقارير والإحصاءات كاملة من الجهازين معاً.
- *  ④ تحديث الكتالوج والزبائن المؤقتين بعد كل مزامنة ناجحة.
+ * أهم شكوى في الجولة السابقة: «المزامنة لا تعمل بشكل مستمر».
+ * ثلاثة جذور حقيقية عولجت هنا:
  *
- * لا يوجد أي مسار يمكن أن يخلق تعارض أرقام: الأرقام الحقيقية
- * تُمنح من نقطة البيع فقط؛ هذا الجهاز يرسل مراجع فريدة فقط.
+ *  ① AppState — أندرويد يجمّد مؤقتات JS في الخلفية؛ عند العودة
+ *     للواجهة نُحضّر العدد المعلق ونُطلق دورة فورية فوراً (لا
+ *     انتظار المؤقت البطيء).
+ *  ② تغيّر IP لنقطة البيع — كان العنوان المحفوظ في الجلسة يتقادم
+ *     بعد إعادة تشغيل الراوتر فيموت الاتصال إلى الأبد. الآن: بعد
+ *     فشل نبضين متتاليين نُطلق بث الاستكشاف UDP ونجرب كل نقطة
+ *     ظهرت على الشبكة: من يقبل رمز جلستنا الحالي (ping + طلب
+ *     موثّق) هو نقطتنا — نُعيد التوجيه إليها ونحفظها في الجلسة،
+ *     فتابع الكاشير يعمل دون أي إعادة إقلاع (طلبه حرفياً).
+ *  ③ العدد المعلق كان يبدأ صفراً بعد الإقلاع — يُحضَّر فور بدء
+ *     المراقبة كي تدفع الدورات السريعة الطابور مبكراً.
+ *
+ * الدورة نفسها كما هي: ping → دفع الطابور بالتسلسل (clientRef يمنع
+ * أي ازدواج) → سحب تزايدي لفواتيري → تحديث الكتالوج والزبائن.
  */
+import {AppState} from 'react-native';
 import {create} from 'zustand';
-import {CashierApi, apiBaseUrl} from '../api/client';
+import {CashierApi, apiBaseUrl, configureApi} from '../api/client';
+import {discoverPosStores} from '../native';
 import {
   bumpOpAttempts,
   cacheCatalog,
@@ -30,6 +38,7 @@ import {
   setLastSyncAt,
   setPullCursor,
 } from './offline';
+import {useSessionStore} from './session';
 import type {SyncOpResult} from '../api/types';
 
 interface SyncState {
@@ -37,8 +46,10 @@ interface SyncState {
   pushing: boolean;
   pending: number;
   lastSyncAt: string | null;
-  /** آخر خطأ دفع (شبكة) — يظهر في شريط الحالة. */
+  /** آخر خطأ دفع (شبكة) — يظهر في الحساب/الإعدادات. */
   lastError: string | null;
+  /** v3.0: يعمل الاستكشاف الآن لإيجاد نقطة البيع بعد تغيّر IP. */
+  rediscovering: boolean;
 }
 
 interface SyncActions {
@@ -55,6 +66,7 @@ export const useSyncStore = create<SyncState & SyncActions>((set, get) => ({
   pending: 0,
   lastSyncAt: null,
   lastError: null,
+  rediscovering: false,
 
   setOnline: online => {
     if (get().online !== online) {
@@ -172,21 +184,91 @@ export const useSyncStore = create<SyncState & SyncActions>((set, get) => ({
   },
 }));
 
+// ── v3.0: الاسترداد بعد تغيّر IP ─────────────────────────────────
+
+let rediscoverRunning = false;
+let lastRediscoverAt = 0;
+
+/**
+ * البحث عن نقطتنا على الشبكة بعد فقدان الاتصال بالعنوان المحفوظ.
+ * الجلسة (الرمز) هي هويتنا: أي نقطة تقبل الرمز وترد على طلب موثّق
+ * هي نقطتنا مهما تغيّر عنوانها — نعيد التوجيه إليها ونحدّث الجلسة.
+ */
+async function rediscoverPos(): Promise<void> {
+  if (rediscoverRunning) {
+    return;
+  }
+  // لا نكرر البث أكثر من مرة كل 10 ثوانٍ — رحمة بالبطارية.
+  if (Date.now() - lastRediscoverAt < 10000) {
+    return;
+  }
+  rediscoverRunning = true;
+  lastRediscoverAt = Date.now();
+  useSyncStore.setState({rediscovering: true});
+  try {
+    const candidates = await discoverPosStores(2000);
+    for (const candidate of candidates) {
+      // جرّب هذا العنوان: ping ثم طلب موثّق برمز الجلسة الحالي.
+      configureApi(candidate.ip, candidate.port);
+      try {
+        await CashierApi.ping();
+        await CashierApi.stats(); // 401 لو الرمز ليس لهذه النقطة.
+      } catch {
+        continue; // ليست نقطتنا (أو الرمز أُبطل — يسقط البحث كله).
+      }
+      // نقطة البيع الصحيحة — احفظها في الجلسة واستأنف فوراً.
+      const session = useSessionStore.getState();
+      if (session.host !== candidate.ip || session.port !== candidate.port) {
+        await session.updateHost(candidate.ip, candidate.port);
+      }
+      useSyncStore.setState({online: true, lastError: null});
+      await useSyncStore.getState().runCycle({force: true});
+      return;
+    }
+    // لم نجد نقطتنا — أعد التوجيه للعنوان الأصلي كي لا نكسر رسائل
+    // الخطأ الواضحة، وسيعاد البحث في المحاولة القادمة.
+    const session = useSessionStore.getState();
+    if (session.host != null) {
+      configureApi(session.host, session.port);
+    }
+  } finally {
+    rediscoverRunning = false;
+    useSyncStore.setState({rediscovering: false});
+  }
+}
+
+// ── المراقبة المستمرة ────────────────────────────────────────────
+
 let monitorStarted = false;
 let monitorTimer: ReturnType<typeof setInterval> | null = null;
 let cycleTimer: ReturnType<typeof setInterval> | null = null;
+let appStateSub: {remove: () => void} | null = null;
 let fastUntil = 0;
+/** فشل نبض متتالٍ — بعد اثنين نبدأ البحث عن نقطتنا على الشبكة. */
+let pingFailures = 0;
 
 /**
  * بدء مراقبة المزامنة المستمرة — تُستدعى مرة بعد الدخول.
  *  • حين هناك عمليات معلقة أو انقطاع حديث: ping كل 6 ثوانٍ.
- *  • وإلا دورة كاملة كل 30 ثانية (سحب فواتير من أجهزة أخرى + كتالوج).
+ *  • وإلا دورة كاملة كل 20 ثانية (سحب فواتير من أجهزة أخرى + كتالوج).
+ *  • العودة من الخلفية (AppState active) → تحضير المعلق + دورة فورية.
+ *  • فشل نبضين → بث استكشاف وإعادة اتصال بنقطتنا أينما كانت.
  */
 export function startSyncMonitor(): void {
   if (monitorStarted) {
     return;
   }
   monitorStarted = true;
+
+  // ③ العدد المعلق يُحضَّر فوراً — لا يبدأ صفراً بعد الإقلاع.
+  void useSyncStore.getState().refreshPending();
+  const stored = getLastSyncAt();
+  void stored.then(value => {
+    if (value != null && useSyncStore.getState().lastSyncAt == null) {
+      useSyncStore.setState({lastSyncAt: value});
+    }
+  });
+
   const cycle = async () => {
     const state = useSyncStore.getState();
     const busy = state.pending > 0 || !state.online;
@@ -195,21 +277,29 @@ export function startSyncMonitor(): void {
     }
     await state.runCycle({force: state.pending > 0});
   };
+
   const tick = async () => {
     const state = useSyncStore.getState();
     if (Date.now() < fastUntil || state.pending > 0 || !state.online) {
       // نبض سريع: ping فقط (رخيص).
       try {
         await CashierApi.ping();
+        pingFailures = 0;
         state.setOnline(true);
         if (state.pending > 0 && !state.pushing) {
           await state.runCycle({force: true});
         }
       } catch {
+        pingFailures += 1;
         state.setOnline(false);
+        // ② فقدنا نقطتنا (IP تغيّر؟) — ابحث عنها على الشبكة.
+        if (pingFailures >= 2 && apiBaseUrl().length > 0) {
+          void rediscoverPos();
+        }
       }
     }
   };
+
   void cycle();
   monitorTimer = setInterval(() => {
     void tick();
@@ -217,7 +307,15 @@ export function startSyncMonitor(): void {
   // دورة أبطأ للسحب العام (سحب فواتير من أجهزة أخرى + كتالوج).
   cycleTimer = setInterval(() => {
     void useSyncStore.getState().runCycle();
-  }, 30000);
+  }, 20000);
+
+  // ① العودة من الخلفية → دورة فورية (المؤقتات كانت مجمدة).
+  appStateSub = AppState.addEventListener('change', state => {
+    if (state === 'active') {
+      void useSyncStore.getState().refreshPending();
+      void useSyncStore.getState().runCycle({force: true});
+    }
+  });
 }
 
 export function stopSyncMonitor(): void {
@@ -229,6 +327,9 @@ export function stopSyncMonitor(): void {
     clearInterval(cycleTimer);
     cycleTimer = null;
   }
+  appStateSub?.remove();
+  appStateSub = null;
+  pingFailures = 0;
   monitorStarted = false;
 }
 

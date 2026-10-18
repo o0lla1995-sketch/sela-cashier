@@ -38,17 +38,25 @@ import java.util.concurrent.atomic.AtomicBoolean
  * نافذة أصلية كاملة الشاشة (خارج شجرة React Native كلياً — نفس
  * الدرس المجرَّب في ScannerActivity لنقطة البيع: المعاينة تُركَّب
  * من أندرويد نفسه فلا شاشة سوداء مهما كان الروم). CameraX Preview
- * + تحليل ML Kit للرموز الرباعية (QR) فقط — النموذج مضمّن فيعمل
- * بلا إنترنت تماماً. أول قراءة ناجحة تهتز الجهاز وتعيد النص إلى
- * الوحدة وتغلق النافذة.
+ * + تحليل ML Kit — النموذج مضمّن فيعمل بلا إنترنت تماماً. أول
+ * قراءة ناجحة تهتز الجهاز وتعيد النص إلى الوحدة وتغلق النافذة.
  *
- * صيغة البطاقة المتوقعة: sela-cashier://IP:PORT (يردِّها الخادم
- * في رمز QR بشاشة الكاشير بنقطة البيع).
+ * v3.0 وضعان عبر EXTRA_MODE:
+ *  • "qr" (الافتراضي) — رموز QR فقط لبطاقة الاتصال
+ *    sela-cashier://IP:PORT (يردِّها الخادم في رمز QR بشاشة الكاشير
+ *    بنقطة البيع).
+ *  • "barcode" — كل صيغ الباركود التجارية (EAN-13/EAN-8/UPC/
+ *    CODE128/CODE39/ITF/Codabar + QR) لمسح باركود المنتجات في
+ *    صفحة البيع — نفس زر المسح في نقطة البيع أندرويد.
  */
 class QrScanActivity : Activity(), LifecycleOwner {
 
   companion object {
     const val EXTRA_RESULT = "qr_result"
+    /** v3.0: وضع المسح — "qr" للاتصال أو "barcode" للمنتجات. */
+    const val EXTRA_MODE = "scan_mode"
+    const val MODE_QR = "qr"
+    const val MODE_BARCODE = "barcode"
     private const val REQUEST_CAMERA = 7311
   }
 
@@ -56,6 +64,11 @@ class QrScanActivity : Activity(), LifecycleOwner {
   private val locked = AtomicBoolean(false)
   private var previewView: PreviewView? = null
   private var statusText: TextView? = null
+  /** v3.0: وضع المسح الحالي (qr افتراضياً — توافق مع الاستدعاءات القديمة). */
+  private var scanMode: String = MODE_QR
+  /** v3.0: الماسح — يُبنى حسب الوضع ويُغلق مع النافذة. */
+  private var barcodeScanner: com.google.mlkit.vision.barcode.BarcodeScanner? = null
+  private var analysisExecutor: java.util.concurrent.ExecutorService? = null
 
   override val lifecycle: Lifecycle
     get() = lifecycleRegistry
@@ -66,6 +79,8 @@ class QrScanActivity : Activity(), LifecycleOwner {
 
     val bg = Color.parseColor("#0E0E12")
     val accent = Color.parseColor("#F97316")
+
+    scanMode = intent?.getStringExtra(EXTRA_MODE) ?: MODE_QR
 
     // ── الواجهة: معاينة + إطار + شريط حالة عربي ──
     val root = FrameLayout(this).apply { setBackgroundColor(bg) }
@@ -92,7 +107,11 @@ class QrScanActivity : Activity(), LifecycleOwner {
     root.addView(frame)
 
     statusText = TextView(this).apply {
-      text = "وجّه الكاميرا إلى باركود الاتصال في شاشة الكاشير بنقطة البيع"
+      text = if (scanMode == MODE_BARCODE) {
+        "وجّه الكاميرا إلى باركود المنتج — يُضاف للسلة مباشرة"
+      } else {
+        "وجّه الكاميرا إلى باركود الاتصال في شاشة الكاشير بنقطة البيع"
+      }
       setTextColor(Color.parseColor("#F4F4F5"))
       textSize = 15f
       gravity = Gravity.CENTER
@@ -185,14 +204,21 @@ class QrScanActivity : Activity(), LifecycleOwner {
           val preview = Preview.Builder().build().also {
             it.setSurfaceProvider(previewView?.surfaceProvider)
           }
+          // v3.0: وضع المنتجات يفتح كل الصيغ التجارية (EAN/UPC/CODE128/
+          // CODE39/ITF/Codabar + QR)؛ وضع الاتصال يبقى QR فقط.
           val options = BarcodeScannerOptions.Builder()
-            .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+            .setBarcodeFormats(
+              if (scanMode == MODE_BARCODE) Barcode.FORMAT_ALL_FORMATS
+              else Barcode.FORMAT_QR_CODE
+            )
             .build()
           val scanner = BarcodeScanning.getClient(options)
+          barcodeScanner = scanner
           val analysis = ImageAnalysis.Builder()
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
             .build()
           val executor = Executors.newSingleThreadExecutor()
+          analysisExecutor = executor
           analysis.setAnalyzer(executor) { proxy: ImageProxy ->
             analyzeFrame(scanner, proxy)
           }
@@ -265,6 +291,17 @@ class QrScanActivity : Activity(), LifecycleOwner {
   }
 
   override fun onDestroy() {
+    // v3.0: تحرير ماسح ML Kit والمنفّذ — لا تسريب موارد مع الإغلاق.
+    try {
+      barcodeScanner?.close()
+    } catch (_: Exception) {
+    }
+    try {
+      analysisExecutor?.shutdown()
+    } catch (_: Exception) {
+    }
+    barcodeScanner = null
+    analysisExecutor = null
     lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     super.onDestroy()
   }

@@ -1,12 +1,16 @@
 /**
- * native.ts — v2.0: جسر الوحدات الأصلية (LanBridge).
+ * native.ts — v3.0: جسر الوحدات الأصلية (LanBridge + SelaBiometric).
  * ─────────────────────────────────────────────────────────────────
- *  • الشبكة: discover (بث UDP) + scanQr (نافذة ماسح QR الأصلية).
+ *  • الشبكة: discover (بث UDP) + scanQr (نافذة ماسح QR الأصلية)
+ *    + scanBarcode — v3.0: ماسح باركود المنتجات (EAN/CODE128/…)
+ *    لنفس زر المسح الموجود في نقطة البيع أندرويد.
  *  • الجهاز: deviceId / deviceLabel.
  *  • التخزين: KV بسيط للجلسة والثيم.
- *  • v2.0 القاعدة المحلية SQLite: dbQuery / dbExecute / dbTransaction
+ *  • القاعدة المحلية SQLite: dbQuery / dbExecute / dbTransaction
  *    — عمود فقري «العمل دون اتصال» (أرشيف الفواتير + طابور المزامنة
  *    + كتالوج المخزون المؤقت).
+ *  • v3.0 البصمة: availability / authenticate — بوابة الدخول
+ *    بالبصمة المفعّلة من الإعدادات.
  */
 import {NativeModules} from 'react-native';
 
@@ -40,14 +44,27 @@ interface LanBridgeNativeModule {
   ): Promise<DbResult>;
   /** v2.0: معاملة ذرية لعدة عبارات. */
   dbTransaction(statementsJson: string): Promise<boolean>;
-  /** v2.0: فتح ماسح QR الأصلي — يعيد نص البطاقة. */
-  scanQr(): Promise<string>;
+  /** فتح ماسح أصلي — v3.0: mode "qr" لبطاقة الاتصال أو "barcode"
+   *  لباركود المنتجات؛ يعيد النص المقروء. */
+  scanQr(mode: string): Promise<string>;
+}
+
+interface BiometricNativeModule {
+  availability(): Promise<'available' | 'none_enrolled' | 'unavailable'>;
+  authenticate(
+    title: string,
+    subtitle: string,
+    cancelText: string,
+  ): Promise<boolean>;
 }
 
 type MaybeModule<T> = T | undefined;
 
 export const LanBridge: MaybeModule<LanBridgeNativeModule> =
   NativeModules.LanBridge as MaybeModule<LanBridgeNativeModule>;
+
+export const SelaBiometric: MaybeModule<BiometricNativeModule> =
+  NativeModules.SelaBiometric as MaybeModule<BiometricNativeModule>;
 
 /** بث الاستكشاف — مصفوفة نقاط البيع على الشبكة المحلية. */
 export async function discoverPosStores(
@@ -120,12 +137,48 @@ export function parseQrConnectPayload(
   return null;
 }
 
-/** فتح ماسح QR — يرفع خطأ عند الإلغاء. */
+/** فتح ماسح QR الاتصال — يرفع خطأ عند الإلغاء. */
 export async function scanQrCode(): Promise<string> {
   if (LanBridge == null || LanBridge.scanQr == null) {
     throw new Error('الماسح غير متاح على هذا الجهاز');
   }
-  return LanBridge.scanQr();
+  return LanBridge.scanQr('qr');
+}
+
+/**
+ * v3.0: فتح ماسح باركود المنتجات (EAN-13/UPC/CODE128/CODE39/ITF…)
+ * — نفس زر المسح في نقطة البيع أندرويد؛ يعيد النص أو يرفع عند الإلغاء.
+ */
+export async function scanProductBarcode(): Promise<string> {
+  if (LanBridge == null || LanBridge.scanQr == null) {
+    throw new Error('الماسح غير متاح على هذا الجهاز');
+  }
+  return LanBridge.scanQr('barcode');
+}
+
+// ── v3.0: البصمة (بوابة الدخول) ──────────────────────────────────
+
+export type BiometricStatus = 'available' | 'none_enrolled' | 'unavailable';
+
+export async function biometricAvailability(): Promise<BiometricStatus> {
+  try {
+    return (await SelaBiometric?.availability()) ?? 'unavailable';
+  } catch {
+    return 'unavailable';
+  }
+}
+
+/** مطالبة بصمة واحدة — true عند النجاح، false عند الإلغاء/الفشل. */
+export async function biometricAuthenticate(
+  title: string,
+  subtitle: string,
+  cancelText: string,
+): Promise<boolean> {
+  try {
+    return (await SelaBiometric?.authenticate(title, subtitle, cancelText)) ?? false;
+  } catch {
+    return false;
+  }
 }
 
 // ── v2.0: القاعدة المحلية ────────────────────────────────────────

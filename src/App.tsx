@@ -1,17 +1,24 @@
 /**
- * App.tsx — سيلّا كاشير v2.0: بوابة الجلسة + الهيكل الجديد.
+ * App.tsx — سيلّا كاشير v3.0: بوابة الجلسة + الهيكل.
  * ─────────────────────────────────────────────────────────────────
  * ① الاستعادة عند الإقلاع: الجلسة محفوظة محلياً — إن بقيت صالحة
  *    (الرمز لم يُبطل من المدير) يدخل التطبيق مباشرة إلى البيع.
- * ② شريط حالة الاتصال الحي أعلى الشاشة: متصل / دون اتصال (وضع
- *    محلي كامل) + عدد العمليات المعلقة — أهم طلبات التاجر.
- * ③ خمس لسانات بأيقونات عائلة سيلا (البيع، الفواتير، التقارير،
- *    الحساب) — هوية تطبيق نقطة البيع نفسها.
- * ④ مراقبة المزامنة المستمرة تعمل طوال الجلسة وتتوقف عند الخروج.
+ * ② الرأس: الشعار + أزرار [المزامنة] [شكل عرض المنتجات] [الوضع
+ *    النهاري/الليلي] — شريط حالة المزامنة تحت الرأس حُذف بطلب
+ *    التاجر («مزعج احذفها»)؛ حالة الاتصال تُرى من زر المزامنة
+ *    (لونه + شارة العمليات المعلقة) ومن صفحة الحساب.
+ * ③ أربع لسانات (البيع، الفواتير، التقارير، الحساب) — هوية نقطة
+ *    البيع نفسها.
+ * ④ بوابة البصمة (جديد): إن فعّلها الكاشير من الإعدادات تُطلب
+ *    بصمتك عند فتح التطبيق قبل الدخول — بلا إعادة اختراع: نفس
+ *    نظام نقطة البيع أندرويد.
+ * ⑤ مراقبة المزامنة المستمرة تعمل طوال الجلسة وتتوقف عند الخروج
+ *    — مع الاسترداد التلقائي بعد تغيّر IP لنقطة البيع.
  */
-import React, {useEffect, useState} from 'react';
+import React, {useEffect, useRef, useState} from 'react';
 import {
   ActivityIndicator,
+  Appearance,
   I18nManager,
   Pressable,
   StyleSheet,
@@ -21,13 +28,9 @@ import {
 import {SafeAreaProvider, SafeAreaView} from 'react-native-safe-area-context';
 import {
   fonts,
-  formatMoney,
   makeStyles,
-  restoreThemeMode,
-  spacing,
-  typography,
-  useThemeColors,
   useThemeStore,
+  useThemeColors,
 } from './theme';
 import {Icon, type IconName} from './Icon';
 import {Toaster, useToastStore} from './ui';
@@ -35,6 +38,9 @@ import {useSessionStore} from './store/session';
 import {startSyncMonitor, stopSyncMonitor, useSyncStore} from './store/sync';
 import {initOfflineStore} from './store/offline';
 import {resetImageMemory} from './store/catalog';
+import {useAppSettings, type ProductView} from './store/settings';
+import {biometricAuthenticate, biometricAvailability} from './native';
+import {restoreThemeMode} from './theme';
 import {LoginScreen} from './screens/LoginScreen';
 import {SellScreen} from './screens/SellScreen';
 import {InvoicesScreen} from './screens/InvoicesScreen';
@@ -46,9 +52,8 @@ type TabKey = 'sell' | 'invoices' | 'stats' | 'me';
 /**
  * v2.1 — حاجز الأخطاء الجذري: أي استثناء عرض (مهما كان مصدره)
  * يُلتقط هنا فتظهر بطاقة عربية واضحة وزر إعادة تشغيل الواجهة —
- * بدل الإغلاق الفوري الصامت للتطبيق (نفس درس الجولة 63 في نقطة
- * البيع: «أي شاشة تنهار لا تُسقط البرنامج كله»). المفتاح key
- * يتغيّر عند «إعادة المحاولة» فيُعاد تركيب الشجرة من الصفر.
+ * بدل الإغلاق الفوري الصامت للتطبيق. المفتاح key يتغيّر عند
+ * «إعادة المحاولة» فيُعاد تركيب الشجرة من الصفر.
  */
 class RootErrorBoundary extends React.Component<
   {children: React.ReactNode},
@@ -147,41 +152,70 @@ const TABS: {key: TabKey; label: string; icon: IconName}[] = [
   {key: 'me', label: 'حسابي', icon: 'user'},
 ];
 
-/** شريط حالة الاتصال الحي أعلى الشاشة. */
-function SyncStatusBar() {
+/** صف أزرار الرأس: المزامنة + شكل العرض + الوضع الليلي/النهاري. */
+function HeaderActions() {
   const c = useThemeColors();
-  const styles = useSyncBarStyles();
+  const styles = useHeaderActionsStyles();
+  const toast = useToastStore(s => s.show);
   const online = useSyncStore(s => s.online);
   const pending = useSyncStore(s => s.pending);
   const runCycle = useSyncStore(s => s.runCycle);
-  const storeName = useSessionStore(s => s.storeName);
-  const cashierName = useSessionStore(s => s.cashierName);
+  const productView = useAppSettings(s => s.productView);
+  const setProductView = useAppSettings(s => s.setProductView);
+  const themeMode = useThemeStore(s => s.mode);
+  const setThemeMode = useThemeStore(s => s.setMode);
+
+  const nextView: ProductView =
+    productView === 'grid' ? 'list' : productView === 'list' ? 'cards' : 'grid';
+  const viewIcon: IconName =
+    productView === 'list'
+      ? 'layoutList'
+      : productView === 'cards'
+      ? 'layoutCards'
+      : 'layoutGrid';
+  const viewLabel =
+    productView === 'grid'
+      ? 'شبكة مربعات'
+      : productView === 'list'
+      ? 'قائمة مضغوطة'
+      : 'بطاقات كبيرة';
 
   return (
-    <View style={[styles.bar, {backgroundColor: online ? c.surfaceAlt : c.warningSoft}]}>
-      <View style={styles.dotRow}>
-        <View
-          style={[styles.dot, {backgroundColor: online ? c.success : c.warning}]}
+    <View style={styles.row}>
+      {/* المزامنة — لونها يتبع حالة الاتصال + شارة العمليات المعلقة */}
+      <Pressable
+        style={[
+          styles.btn,
+          online ? {borderColor: c.successSoft} : {borderColor: c.warning},
+        ]}
+        onPress={() => {
+          void runCycle({force: true});
+          toast(online ? 'جارٍ المزامنة الآن…' : 'يبحث عن نقطة البيع…', 'info');
+        }}>
+        <Icon name="sync" size={17} color={online ? c.success : c.warning} />
+        {pending > 0 ? <View style={styles.pendingDot} /> : null}
+      </Pressable>
+      {/* شكل عرض المنتجات — شبكة ← قائمة ← بطاقات */}
+      <Pressable
+        style={styles.btn}
+        onPress={() => {
+          setProductView(nextView);
+          toast(`شكل العرض: ${viewLabel}`, 'info');
+        }}>
+        <Icon name={viewIcon} size={17} color={c.text} />
+      </Pressable>
+      {/* الوضع الليلي/النهاري */}
+      <Pressable
+        style={styles.btn}
+        onPress={() =>
+          setThemeMode(themeMode === 'dark' ? 'light' : 'dark')
+        }>
+        <Icon
+          name={useThemeStore.getState().resolved === 'dark' ? 'sun' : 'moon'}
+          size={17}
+          color={c.text}
         />
-        <Text style={[styles.storeText, {color: online ? c.textDim : c.warning}]} numberOfLines={1}>
-          {cashierName || 'كاشير'} · {storeName || 'سيلّا'}
-          {online ? ' — متصل' : ' — دون اتصال: البيع يعمل محلياً'}
-        </Text>
-      </View>
-      {pending > 0 ? (
-        <Pressable
-          style={styles.pendingChip}
-          onPress={() => void runCycle({force: true})}>
-          <Icon name="sync" size={13} color={c.warning} />
-          <Text style={[styles.pendingText, {color: c.warning}]}>
-            {pending} بانتظار المزامنة
-          </Text>
-        </Pressable>
-      ) : (
-        <Text style={[styles.okText, {color: c.textFaint}]}>
-          {online ? 'مُزامَن' : 'جاهز للمزامنة'}
-        </Text>
-      )}
+      </Pressable>
     </View>
   );
 }
@@ -190,14 +224,6 @@ function MainTabs() {
   const styles = useStyles();
   const c = useThemeColors();
   const [tab, setTab] = useState<TabKey>('sell');
-  const syncSystem = useThemeStore(s => s.syncSystem);
-
-  useEffect(() => {
-    const subscription = ({remove: () => undefined} as unknown as {
-      remove: () => void;
-    });
-    return () => subscription.remove();
-  }, []);
 
   return (
     <View style={styles.root}>
@@ -214,26 +240,9 @@ function MainTabs() {
               كل عملية تُسجَّل باسمك — حتى دون اتصال
             </Text>
           </View>
-          <View style={{width: 8}} />
-          <Pressable
-            style={styles.themeBtn}
-            onPress={() => {
-              const mode = useThemeStore.getState().mode;
-              useThemeStore
-                .getState()
-                .setMode(mode === 'dark' ? 'light' : 'dark');
-            }}>
-            <Icon
-              name={
-                useThemeStore.getState().resolved === 'dark' ? 'sun' : 'moon'
-              }
-              size={18}
-              color={c.text}
-            />
-          </Pressable>
+          <HeaderActions />
         </View>
       </SafeAreaView>
-      <SyncStatusBar />
       <View style={{flex: 1}}>
         {tab === 'sell' ? <SellScreen /> : null}
         {tab === 'invoices' ? <InvoicesScreen /> : null}
@@ -269,24 +278,128 @@ function MainTabs() {
   );
 }
 
+/**
+ * v3.0 — بوابة البصمة: تعمل عند فتح التطبيق فقط (وليس عند كل
+ * عودة من الخلفية — الماسح والنوافذ الأصلية تُخرج التطبيق
+ * باستمرار؛ نفس درس نقطة البيع). إن تعذّرت البصمة (لا يوجد جهاز
+ * أو لم تُسجّل) تظهر رسالة واضحة ويمح الدخول بدونها كي لا يعلق
+ * الكاشير خارج تطبيقه أبداً.
+ */
+function BiometricGate({onUnlock}: {onUnlock: () => void}) {
+  const c = useThemeColors();
+  const styles = useGateStyles();
+  const toast = useToastStore(s => s.show);
+  const [busy, setBusy] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
+
+  const tryUnlock = async () => {
+    if (busy) {
+      return;
+    }
+    setBusy(true);
+    try {
+      const status = await biometricAvailability();
+      if (status !== 'available') {
+        setUnavailable(true);
+        return;
+      }
+      const ok = await biometricAuthenticate(
+        'الدخول إلى سيلّا كاشير',
+        'المس المستشعر لإكمال الدخول',
+        'إلغاء',
+      );
+      if (ok) {
+        onUnlock();
+      } else {
+        toast('لم تكتمل البصمة — حاول مرة أخرى', 'info');
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // مطالبة تلقائية فور ظهور البوابة.
+  const askedRef = useRef(false);
+  useEffect(() => {
+    if (askedRef.current) {
+      return;
+    }
+    askedRef.current = true;
+    void tryUnlock();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return (
+    <View style={styles.screen}>
+      <View style={styles.card}>
+        <View style={styles.iconChip}>
+          <Icon name="fingerprint" size={38} color={c.accent} />
+        </View>
+        <Text style={styles.title}>التطبيق مقفل بالبصمة</Text>
+        <Text style={styles.sub}>
+          فعّلت الدخول بالبصمة من الإعدادات — أكمل الدخول لبصمتك
+          لفتح شاشة البيع.
+        </Text>
+        <Pressable
+          style={[styles.btn, busy ? {opacity: 0.6} : null]}
+          onPress={() => void tryUnlock()}
+          disabled={busy}>
+          {busy ? (
+            <ActivityIndicator color="#FFFFFF" />
+          ) : (
+            <Text style={styles.btnText}>الدخول بالبصمة</Text>
+          )}
+        </Pressable>
+        {unavailable ? (
+          <>
+            <Text style={styles.warn}>
+              البصمة غير متاحة على هذا الجهاز الآن (لم تُسجّل أو الحساس
+              مشغول) — يمكنك الدخول بدونها وتعطيل القفل من الإعدادات.
+            </Text>
+            <Pressable style={styles.ghostBtn} onPress={onUnlock}>
+              <Text style={styles.ghostText}>الدخول بدون بصمة</Text>
+            </Pressable>
+          </>
+        ) : null}
+      </View>
+    </View>
+  );
+}
+
 export default function App() {
   const styles = useAppStyles();
   const ready = useSessionStore(s => s.ready);
   const token = useSessionStore(s => s.token);
   const restore = useSessionStore(s => s.restore);
+  const settingsLoaded = useAppSettings(s => s.loaded);
+  const fingerprintLock = useAppSettings(s => s.fingerprintLock);
+  // القفل يُقرر مرة واحدة عند الإقلاع (بعد تحميل الإعدادات) —
+  // تحديث الإعداد بعدها لا يقفل الجلسة الجارية.
+  const [locked, setLocked] = useState<boolean | null>(null);
 
   useEffect(() => {
     void (async () => {
       await restoreThemeMode();
+      await useAppSettings.getState().load();
       await restore();
       await initOfflineStore();
     })();
   }, [restore]);
 
+  // قرار البوابة: فقط عندما تكون الإعدادات والجلسة جاهزتين.
+  useEffect(() => {
+    if (!ready || !settingsLoaded) {
+      return;
+    }
+    if (locked == null) {
+      setLocked(fingerprintLock && Boolean(token));
+    }
+  }, [ready, settingsLoaded, fingerprintLock, token, locked]);
+
   // تشغيل مراقبة المزامنة بعد الدخول وإيقافها عند الخروج.
   const hasToken = Boolean(token);
   useEffect(() => {
-    if (hasToken) {
+    if (hasToken && locked === false) {
       startSyncMonitor();
       return () => {
         stopSyncMonitor();
@@ -294,18 +407,18 @@ export default function App() {
       };
     }
     return undefined;
-  }, [hasToken]);
+  }, [hasToken, locked]);
 
   // مزامنة الوضع التلقائي مع النظام.
   useEffect(() => {
-    const appear = ({remove: () => undefined} as unknown as {
-      remove: () => void;
+    const sub = Appearance.addChangeListener(() => {
+      useThemeStore.getState().syncSystem();
     });
     useThemeStore.getState().syncSystem();
-    return () => appear.remove();
+    return () => sub.remove();
   }, []);
 
-  if (!ready) {
+  if (!ready || !settingsLoaded) {
     return (
       <View style={styles.boot}>
         <ActivityIndicator color="#F97316" size="large" />
@@ -316,7 +429,13 @@ export default function App() {
   return (
     <RootErrorBoundary>
       <SafeAreaProvider>
-        {token ? <MainTabs /> : <LoginScreen />}
+        {locked && hasToken ? (
+          <BiometricGate onUnlock={() => setLocked(false)} />
+        ) : token ? (
+          <MainTabs />
+        ) : (
+          <LoginScreen />
+        )}
       </SafeAreaProvider>
     </RootErrorBoundary>
   );
@@ -356,22 +475,14 @@ const useStyles = makeStyles(c =>
     headerTitle: {
       color: c.text,
       fontFamily: fonts.black,
-      fontSize: typography.body + 1,
+      fontSize: 17.5,
       textAlign: I18nManager.isRTL ? 'right' : 'left',
     },
     headerSub: {
       color: c.textDim,
       fontFamily: fonts.regular,
-      fontSize: typography.micro + 2,
+      fontSize: 11.5,
       textAlign: I18nManager.isRTL ? 'right' : 'left',
-    },
-    themeBtn: {
-      width: 38,
-      height: 38,
-      borderRadius: 11,
-      backgroundColor: c.surfaceHi,
-      alignItems: 'center',
-      justifyContent: 'center',
     },
     tabBar: {
       backgroundColor: c.surface,
@@ -392,55 +503,109 @@ const useStyles = makeStyles(c =>
     tabLabel: {
       color: c.textFaint,
       fontFamily: fonts.medium,
-      fontSize: typography.micro + 2,
+      fontSize: 11,
     },
   }),
 );
 
-const useSyncBarStyles = makeStyles(c =>
+const useHeaderActionsStyles = makeStyles(c =>
   StyleSheet.create({
-    bar: {
-      flexDirection: 'row',
+    row: {flexDirection: 'row', gap: 7, alignItems: 'center'},
+    btn: {
+      width: 38,
+      height: 38,
+      borderRadius: 11,
+      backgroundColor: c.surfaceHi,
+      borderWidth: 1,
+      borderColor: c.border,
       alignItems: 'center',
-      gap: 8,
-      paddingHorizontal: spacing.md,
-      paddingVertical: 6,
-      borderBottomWidth: 1,
-      borderBottomColor: c.borderSoft,
+      justifyContent: 'center',
     },
-    dotRow: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 7,
-      flex: 1,
-      minWidth: 0,
-    },
-    dot: {width: 8, height: 8, borderRadius: 999},
-    storeText: {
-      fontFamily: fonts.medium,
-      fontSize: typography.micro + 2,
-      flexShrink: 1,
-    },
-    pendingChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 5,
-      backgroundColor: c.surface,
+    pendingDot: {
+      position: 'absolute',
+      top: 4,
+      left: 4,
+      width: 9,
+      height: 9,
       borderRadius: 999,
-      paddingHorizontal: 9,
-      paddingVertical: 4,
-    },
-    pendingText: {
-      fontFamily: fonts.bold,
-      fontSize: typography.micro + 1,
-    },
-    okText: {
-      fontFamily: fonts.regular,
-      fontSize: typography.micro + 1,
+      backgroundColor: c.warning,
+      borderWidth: 1.5,
+      borderColor: c.surfaceHi,
     },
   }),
 );
 
-// مرجع تنسيق المال مستعمل في SyncStatusBar مستقبلاً — منع الحذف.
-export const __formatMoney = formatMoney;
-export const __useToast = useToastStore;
+const useGateStyles = makeStyles(c =>
+  StyleSheet.create({
+    screen: {
+      flex: 1,
+      backgroundColor: c.bg,
+      alignItems: 'center',
+      justifyContent: 'center',
+      padding: 28,
+    },
+    card: {
+      width: '100%',
+      maxWidth: 360,
+      backgroundColor: c.surface,
+      borderRadius: 22,
+      borderWidth: 1,
+      borderColor: c.borderSoft,
+      padding: 26,
+      alignItems: 'center',
+      gap: 12,
+    },
+    iconChip: {
+      width: 76,
+      height: 76,
+      borderRadius: 24,
+      backgroundColor: c.accentSofter,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    title: {
+      color: c.text,
+      fontFamily: fonts.black,
+      fontSize: 18,
+      textAlign: 'center',
+    },
+    sub: {
+      color: c.textDim,
+      fontFamily: fonts.regular,
+      fontSize: 13.5,
+      textAlign: 'center',
+      lineHeight: 20,
+    },
+    btn: {
+      backgroundColor: c.accent,
+      borderRadius: 14,
+      paddingHorizontal: 34,
+      paddingVertical: 13,
+      marginTop: 4,
+    },
+    btnText: {
+      color: c.onAccent,
+      fontFamily: fonts.black,
+      fontSize: 15,
+    },
+    warn: {
+      color: c.warning,
+      fontFamily: fonts.regular,
+      fontSize: 12,
+      textAlign: 'center',
+      lineHeight: 18,
+    },
+    ghostBtn: {
+      borderRadius: 12,
+      borderWidth: 1,
+      borderColor: c.border,
+      paddingHorizontal: 20,
+      paddingVertical: 10,
+    },
+    ghostText: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: 13,
+    },
+  }),
+);

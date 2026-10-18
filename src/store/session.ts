@@ -47,6 +47,9 @@ export interface SessionState {
     perms?: CashierPerms;
   }) => Promise<void>;
   setPerms: (perms: CashierPerms) => void;
+  /** v3.0: تحديث عنوان نقطة البيع بعد استكشافها من جديد (تغيّر IP
+   *  مع بقاء الجلسة صالحة) — دون المساس بالرمز أو الهوية. */
+  updateHost: (host: string, port: number) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -152,6 +155,25 @@ export const useSessionStore = create<SessionState>((set, get) => ({
         }
       }
     })();
+  },
+
+  async updateHost(host, port) {
+    // نفس الرمز والهوية — العنوان الجديد فقط.
+    configureApi(host, port);
+    const current = get();
+    set({host, port});
+    await storageSet(
+      SESSION_KEY,
+      JSON.stringify({
+        host,
+        port,
+        token: current.token,
+        storeName: current.storeName,
+        cashierId: current.cashierId,
+        cashierName: current.cashierName,
+        perms: current.perms,
+      }),
+    );
   },
 
   async signOut() {

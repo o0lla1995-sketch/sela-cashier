@@ -138,6 +138,37 @@ describe('v2.0 — سلة المتغيرات (إصلاح خطأ منتج متغ�
     expect(lines).toHaveLength(1);
     expect(lines[0].quantity).toBe(3);
   });
+
+  test('v3.0 — منتج نفد لا يدخل السلة أبداً (نفس قاعدة نقطة البيع)', () => {
+    const product = sampleProduct();
+    // نفد كلياً.
+    const out = {...product, stockQty: 0} as never;
+    expect(useCartStore.getState().add(out, null, 1, null).ok).toBe(false);
+    expect(useCartStore.getState().lines).toHaveLength(0);
+    // المتاح 24: 20 مقبولة، والخمس الإضافية مرفوضة (المتاح 4 فقط).
+    expect(useCartStore.getState().add(product, null, 20, null).ok).toBe(true);
+    const extra = useCartStore.getState().add(product, null, 5, null);
+    expect(extra.ok).toBe(false);
+    expect(extra.reason).toContain('المتاح');
+    expect(useCartStore.getState().lines).toHaveLength(1);
+    // بلا تتبع مخزون — يُباع دائماً.
+    useCartStore.getState().clear();
+    const untracked = {...product, stockUntracked: true} as never;
+    expect(useCartStore.getState().add(untracked, null, 999, null).ok).toBe(
+      true,
+    );
+  });
+
+  test('v3.0 — متغير ملابس نافد مرفوض وربطته محفوظة', () => {
+    const product = variantProduct();
+    // متغير 11 رصيده 4 — الخامسة مرفوضة برسالة عربية.
+    const fifth = useCartStore.getState().add(product, null, 5, 11);
+    expect(fifth.ok).toBe(false);
+    expect(fifth.reason).toContain('المتاح');
+    expect(useCartStore.getState().lines).toHaveLength(0);
+    // أربع قطع مقبولة تماماً.
+    expect(useCartStore.getState().add(product, null, 4, 11).ok).toBe(true);
+  });
 });
 
 describe('v2.0 — مراجع العملية وبطاقة QR', () => {
