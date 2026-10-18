@@ -1,4 +1,4 @@
-package com.selacashier
+package com.sela.cashier
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
