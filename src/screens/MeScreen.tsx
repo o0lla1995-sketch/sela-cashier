@@ -6,8 +6,10 @@
  * ③ الطباعة (جديد): حالة طابعة نقطة البيع المتصلة + تفعيل/إلغاء
  *    طباعة الفواتير منها — تُطبع لحظة البيع مباشرة.
  * ④ الأمان (جديد): الدخول للتطبيق بالبصمة عند الإقلاع.
- * ⑤ الوضع النهاري/الليلي/تلقائي — نفس نظام نقطة البيع.
- * ⑥ تسجيل الخروج (يبقى الأرشيف المحلي — يُربط بحسابك عند الدخول).
+ * ⑤ الأصوات (v3.1): نغمة تأكيد عند مسح الباركود وإضافة منتج
+ *    للسلة — مثل نقطة البيع أندرويد تماماً.
+ * ⑥ الوضع النهاري/الليلي/تلقائي — نفس نظام نقطة البيع.
+ * ⑦ تسجيل الخروج (يبقى الأرشيف المحلي — يُربط بحسابك عند الدخول).
  */
 import React, {useEffect, useState} from 'react';
 import {ScrollView, Text, View} from 'react-native';
@@ -52,6 +54,8 @@ export function MeScreen() {
   const setPrintReceipts = useAppSettings(s => s.setPrintReceipts);
   const fingerprintLock = useAppSettings(s => s.fingerprintLock);
   const setFingerprintLock = useAppSettings(s => s.setFingerprintLock);
+  const soundEnabled = useAppSettings(s => s.soundEnabled);
+  const setSoundEnabled = useAppSettings(s => s.setSoundEnabled);
   const [archiveCount, setArchiveCount] = useState(0);
   // حالة طابعة نقطة البيع: متصلة أم لا (+ اسمها).
   const [printer, setPrinter] = useState<{
@@ -247,6 +251,21 @@ export function MeScreen() {
         />
       </Card>
 
+      {/* الأصوات — نغمة المسح والإضافة (v3.1) */}
+      <SectionTitle
+        title="الأصوات"
+        hint="نغمة تأكيد مثل نقطة البيع أندرويد"
+      />
+      <Card>
+        <SwitchRow
+          label="نغمة عند مسح الباركود وإضافة منتج"
+          hint="نغمة قصيرة من مكبر الجهاز عند تطابق الباركود وكل إضافة ناجحة للسلة"
+          icon="barcode"
+          value={soundEnabled}
+          onValueChange={on => setSoundEnabled(on)}
+        />
+      </Card>
+
       {/* المظهر */}
       <SectionTitle title="المظهر" hint="نفس أوضاع نقطة البيع" />
       <Card>
@@ -279,7 +298,7 @@ export function MeScreen() {
         variant="danger"
         onPress={() => void signOut()}
       />
-      <Text style={styles.version}>سيلّا كاشير · الإصدار 3.0.1 (5)</Text>
+      <Text style={styles.version}>سيلّا كاشير · الإصدار 3.1.0 (6)</Text>
     </ScrollView>
   );
 }

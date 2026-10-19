@@ -245,7 +245,19 @@ export const CashierApi = {
     saleId?: number;
     /** v2.0: مرجع الفاتورة الأصلية إن أُجريت دون اتصال. */
     saleClientRef?: string;
-    lines: {saleItemId: number; quantity: number}[];
+    /**
+     * v3.1 (الجولة 65): كل سطر يحمل تعريفه الكامل — saleItemId هو
+     * معرّف الخادم عند معرفته (فاتورة متزامنة)، ومعه دائماً
+     * productId + variantLabel + unit_name كتوقيع مطابقة احتياطي
+     * يحلّه الخادم حين لا نعرف معرّفه (فاتورة معلقة/جهاز آخر).
+     */
+    lines: {
+      saleItemId: number;
+      productId: number;
+      variantLabel?: string | null;
+      unitName?: string | null;
+      quantity: number;
+    }[];
     exchange?: SaleLineInput[];
     refundMethod?: 'cash' | 'none';
     note?: string;

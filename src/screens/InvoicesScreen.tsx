@@ -66,7 +66,7 @@ import {
   variantLabel as makeVariantLabel,
   variantPrice,
 } from '../store/catalog';
-import type {CatalogProduct, InvoiceDetail} from '../api/types';
+import type {CatalogProduct, InvoiceDetail, InvoiceLine} from '../api/types';
 import {useSessionStore} from '../store/session';
 import {useAppSettings} from '../store/settings';
 import {scanProductBarcode} from '../native';
@@ -444,6 +444,66 @@ interface ExchangePick {
   unitPrice: number;
 }
 
+/**
+ * v3.1 (الجولة 65) — سطر إرجاع موحّد: الصنف كما يعرفه هذا الجهاز
+ * مرتبطاً بنظيره عند الخادم. بهذا تُحل ثلاث جذور منع الإرجاع:
+ *  ① معرّف صنف الخادم يُرسل بدل المعرّف المحلي (كان الخادم يرفضه).
+ *  ② فواتير أجهزة أخرى لنفس حسابي (بلا أصناف محلية) تُبنى أسطرها
+ *     من لقطة الخادم مباشرة — فيصبح إرجاعها ممكناً.
+ *  ③ المطابقة بالتوقيع الكامل (منتج + متغير + وحدة) لا برقم
+ *     المنتج وحده.
+ */
+interface ReturnLine {
+  key: string;
+  /** معرّف الصنف في أرشيفي المحلي (null لفواتير الأجهزة الأخرى). */
+  localId: number | null;
+  /** معرّف صنف الخادم الحقيقي — يُرسل مع الإرجاع إن عُرف. */
+  serverItemId: number | null;
+  productId: number;
+  name: string;
+  variantLabel: string | null;
+  unitName: string | null;
+  quantity: number;
+  unitPrice: number;
+  /**
+   * أساس المتبقي: لقطة الخادم الرسمية إن حُمّلت (تتضمن كل مرتجع
+   * متزامن)، وإلا الكمية الأصلية المحلية.
+   */
+  baseRemaining: number;
+}
+
+/** تطبيع أسماء وحدة القاعدة (حبة/قطعة/فارغ = وحدة واحدة). */
+function sameBaseUnit(a: string | null, b: string | null): boolean {
+  const norm = (v: string | null) =>
+    v == null || v === '' || v === 'حبة' || v === 'قطعة' ? '' : v;
+  return norm(a) === norm(b);
+}
+
+/**
+ * ربط سطر محلي بنظيره عند الخادم — بالتوقيع الكامل (منتج + متغير +
+ * وحدة مطبَّعة)، مع منع استهلاك سطر خادم واحد لسطرين محليين.
+ */
+function matchServerLine(
+  serverLines: InvoiceLine[],
+  productId: number,
+  variantLabel: string | null,
+  unitName: string | null,
+  taken: Set<number>,
+): InvoiceLine | null {
+  const candidates = serverLines.filter(
+    line =>
+      line.productId === productId &&
+      (line.variantLabel ?? null) === variantLabel &&
+      sameBaseUnit(line.unitName ?? null, unitName) &&
+      !taken.has(line.saleItemId),
+  );
+  if (candidates.length === 0) {
+    return null;
+  }
+  // الأعلى أولوية: سطر ما زال له متبقٍ؛ وإلا الأول.
+  return candidates.find(line => line.remaining > 0.0001) ?? candidates[0];
+}
+
 /** تفاصيل فاتورة من الأرشيف المحلي + الإرجاع/الاستبدال. */
 function InvoiceDetailSheet({
   invoice,
@@ -466,7 +526,6 @@ function InvoiceDetailSheet({
 }) {
   const c = useThemeColors();
   const styles = useDetailStyles();
-  const products = useCatalogStore(s => s.products);
   const [items, setItems] = useState<LocalInvoiceItem[]>([]);
   const [serverDetail, setServerDetail] = useState<InvoiceDetail | null>(null);
   const [returnOpen, setReturnOpen] = useState(false);
@@ -478,20 +537,35 @@ function InvoiceDetailSheet({
     void invoiceItems(invoice.ref).then(setItems);
   }, [invoice.ref]);
 
-  // تفاصيل الخادم (الكميات المتبقية الحقيقية) — للفواتير المتزامنة.
+  // v3.1: تفاصيل الخادم (المتبقي الرسمي + معرّفات أصنافه الحقيقية)
+  // للفواتير المتزامنة — وبالبحث برقم الفاتورة مباشرة (invoiceByNumber)
+  // بدل قصرها على آخر 100 فاتورة، فتشمل الفواتير الأقدم أيضاً.
   useEffect(() => {
     setServerDetail(null);
     if (invoice.status !== 'synced' || !online || invoice.syncedNumber == null) {
       return;
     }
+    const syncedNumber = invoice.syncedNumber;
     void (async () => {
       try {
-        const list = await CashierApi.invoices(100, 0);
-        const hit = (list.invoices ?? []).find(
-          inv => inv.number === invoice.syncedNumber,
-        );
-        if (hit) {
-          const detail = await CashierApi.invoice(hit.id);
+        let hitId: number | null = null;
+        try {
+          const byNumber = await CashierApi.invoiceByNumber(syncedNumber);
+          if (byNumber.invoice != null) {
+            hitId = byNumber.invoice.id;
+          }
+        } catch {
+          // نجرب مسار القائمة كخطة بديلة.
+        }
+        if (hitId == null) {
+          const list = await CashierApi.invoices(100, 0);
+          hitId =
+            (list.invoices ?? []).find(
+              inv => inv.number === syncedNumber,
+            )?.id ?? null;
+        }
+        if (hitId != null) {
+          const detail = await CashierApi.invoice(hitId);
           setServerDetail(detail);
         }
       } catch {
@@ -500,18 +574,54 @@ function InvoiceDetailSheet({
     })();
   }, [invoice.ref, invoice.status, invoice.syncedNumber, online]);
 
-  /** المتبقي للعرض في التفاصيل — من الخادم للفواتير المتزامنة، أو
-   *  الكمية كاملة محلياً (النافذة تعرض الدقة الكاملة عند الإرجاع). */
-  const remainingFor = useCallback(
-    (item: LocalInvoiceItem): number => {
-      const serverLine =
-        serverDetail?.lines.find(
-          l => l.productId === item.productId,
-        ) ?? null;
-      return serverLine ? serverLine.remaining : item.quantity;
-    },
-    [serverDetail],
-  );
+  /**
+   * v3.1 (الجولة 65) — الأسطر الموحّدة للعرض والإرجاع:
+   *  • أصناف محلية مرتبطة بنظيرها عند الخادم (معرّفه + متبقيه).
+   *  • فواتير الأجهزة الأخرى (بلا أصناف محلية): تُبنى أسطرها من
+   *    لقطة الخادم مباشرة — فيصبح إرجاعها واستبدالها ممكناً.
+   */
+  const returnLines = useMemo<ReturnLine[]>(() => {
+    const serverLines = serverDetail?.lines ?? [];
+    const taken = new Set<number>();
+    if (items.length === 0) {
+      return serverLines.map(line => ({
+        key: `srv-${line.saleItemId}`,
+        localId: null,
+        serverItemId: line.saleItemId,
+        productId: line.productId,
+        name: line.productName,
+        variantLabel: line.variantLabel ?? null,
+        unitName: line.unitName ?? null,
+        quantity: line.quantity,
+        unitPrice: line.unitPrice,
+        baseRemaining: line.remaining,
+      }));
+    }
+    return items.map(item => {
+      const serverLine = matchServerLine(
+        serverLines,
+        item.productId,
+        item.variantLabel,
+        item.unitName,
+        taken,
+      );
+      if (serverLine != null) {
+        taken.add(serverLine.saleItemId);
+      }
+      return {
+        key: `loc-${item.id}`,
+        localId: item.id,
+        serverItemId: serverLine?.saleItemId ?? null,
+        productId: item.productId,
+        name: item.name,
+        variantLabel: item.variantLabel,
+        unitName: item.unitName,
+        quantity: item.quantity,
+        unitPrice: serverLine?.unitPrice ?? item.unitPrice,
+        baseRemaining: serverLine ? serverLine.remaining : item.quantity,
+      };
+    });
+  }, [items, serverDetail]);
 
   return (
     <View style={styles.overlay} pointerEvents="box-none">
@@ -573,28 +683,34 @@ function InvoiceDetailSheet({
           style={{flexGrow: 0, maxHeight: 300}}
           contentContainerStyle={{gap: 6}}
           showsVerticalScrollIndicator={false}>
-          {items.length === 0 ? (
-            <Text style={styles.dimText}>
-              فاتورة من جهاز آخر — تفاصيل أصنافها محفوظة في نقطة البيع.
-            </Text>
+          {returnLines.length === 0 ? (
+            items.length === 0 ? (
+              <Text style={styles.dimText}>
+                {online && invoice.status === 'synced'
+                  ? 'يجلب تفاصيل الأصناف من نقطة البيع…'
+                  : 'فاتورة من جهاز آخر — تفاصيل أصنافها عند عودة الاتصال بنقطة البيع.'}
+              </Text>
+            ) : null
           ) : (
-            items.map(item => (
-              <View key={item.id} style={styles.itemRow}>
+            returnLines.map(line => (
+              <View key={line.key} style={styles.itemRow}>
                 <View style={{flex: 1, minWidth: 0}}>
                   <Text style={styles.itemName} numberOfLines={2}>
-                    {item.name}
-                    {item.variantLabel ? ` (${item.variantLabel})` : ''}
-                    {item.unitName && item.unitName !== 'حبة'
-                      ? ` (${item.unitName})`
+                    {line.name}
+                    {line.variantLabel ? ` (${line.variantLabel})` : ''}
+                    {line.unitName &&
+                    line.unitName !== 'حبة' &&
+                    line.unitName !== 'قطعة'
+                      ? ` (${line.unitName})`
                       : ''}
                   </Text>
                   <Text style={styles.dimText}>
-                    {formatQty(item.quantity)} × {formatMoney(item.unitPrice)} ={' '}
-                    {formatMoney(item.lineTotal)}
+                    {formatQty(line.quantity)} × {formatMoney(line.unitPrice)} ={' '}
+                    {formatMoney(line.unitPrice * line.quantity)}
                   </Text>
                   {isSale ? (
                     <Text style={styles.remainingText}>
-                      قابل للإرجاع: {formatQty(remainingFor(item))}
+                      قابل للإرجاع: {formatQty(line.baseRemaining)}
                     </Text>
                   ) : null}
                 </View>
@@ -610,7 +726,7 @@ function InvoiceDetailSheet({
           <Text style={styles.totalText}>{formatMoney(invoice.total)}</Text>
         </View>
 
-        {isSale && canReturn && items.length > 0 ? (
+        {isSale && canReturn && returnLines.length > 0 ? (
           <AppButton
             title="إرجاع / استبدال أصناف"
             icon="undo"
@@ -623,8 +739,8 @@ function InvoiceDetailSheet({
       {returnOpen ? (
         <ReturnSheet
           invoice={invoice}
-          items={items}
-          serverDetail={serverDetail}
+          lines={returnLines}
+          hasServerSnapshot={serverDetail != null}
           online={online}
           deviceId={deviceId}
           printReceipts={printReceipts}
@@ -642,11 +758,16 @@ function InvoiceDetailSheet({
  * اختيار كميات المرتجع بمحددات الخطوة + «الكل» فوق المتبقي الحقيقي،
  * الاستبدال نافذة طبقة أعلى بقيم حية وفرق يُسوّى، وزر تأكيد دائم
  * الثبات أسفل الشاشة.
+ *
+ * v3.1 (الجولة 65): الأسطر الموحّدة ReturnLine — معرّف صنف الخادم
+ * الحقيقي يُرسل عند معرفته، ومعه توقيع الصنف (منتج + متغير + وحدة)
+ * ليحلّه الخادم عند غيابه (فواتير معلّقة أو من جهاز آخر) — كان
+ * المعرّف المحلي يُرسل فيرفض الخادم الإرجاع دائماً تقريباً.
  */
 function ReturnSheet({
   invoice,
-  items,
-  serverDetail,
+  lines,
+  hasServerSnapshot,
   online,
   deviceId,
   printReceipts,
@@ -655,8 +776,10 @@ function ReturnSheet({
   onToast,
 }: {
   invoice: LocalInvoice;
-  items: LocalInvoiceItem[];
-  serverDetail: InvoiceDetail | null;
+  lines: ReturnLine[];
+  /** لقطة الخادم محمّلة؟ إذاً متبقيها يشمل المرتجعات المتزامنة —
+   *  لا نخصم منها سوى المرتجعات المحلية غير المرفوعة بعد. */
+  hasServerSnapshot: boolean;
   online: boolean;
   deviceId: string;
   printReceipts: boolean;
@@ -666,53 +789,53 @@ function ReturnSheet({
 }) {
   const c = useThemeColors();
   const styles = useReturnStyles();
-  const [quantities, setQuantities] = useState<Record<number, number>>({});
+  const [quantities, setQuantities] = useState<Record<string, number>>({});
   const [exchangePicks, setExchangePicks] = useState<ExchangePick[]>([]);
   const [exchangeOpen, setExchangeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
 
-  // المتبقي الحقيقي لكل صنف: خادم (للمتزامنة) أو الكمية المحلية —
-  // مطروح منه كل مرتجع محلي سابق على نفس الفاتورة.
-  const [localReturned, setLocalReturned] = useState<Record<number, number>>({});
+  // المرتجعات المحلية السابقة من هذه الفاتورة بالذات (source_ref):
+  // مع لقطة الخادم نعدّ المعلّقة فقط (المتزامنة محسوبة داخل اللقطة)،
+  // وبلا لقطة نعدّها كلها فوق الكمية الأصلية المحلية.
+  const [localReturned, setLocalReturned] = useState<Record<string, number>>({});
   useEffect(() => {
     void (async () => {
-      const out: Record<number, number> = {};
-      for (const item of items) {
-        out[item.id] = await returnedQtyForLine(
+      const out: Record<string, number> = {};
+      for (const line of lines) {
+        out[line.key] = await returnedQtyForLine(
           invoice.ref,
-          item.productId,
-          item.variantLabel,
+          line.productId,
+          line.variantLabel,
+          line.unitName,
+          hasServerSnapshot,
         );
       }
       setLocalReturned(out);
     })();
-  }, [invoice.ref, items]);
+  }, [invoice.ref, lines, hasServerSnapshot]);
 
   const remainingFor = useCallback(
-    (item: LocalInvoiceItem): number => {
-      const serverLine =
-        serverDetail?.lines.find(l => l.productId === item.productId) ?? null;
-      const base = serverLine ? serverLine.remaining : item.quantity;
-      return Math.max(0, base - (localReturned[item.id] ?? 0));
+    (line: ReturnLine): number => {
+      return Math.max(0, line.baseRemaining - (localReturned[line.key] ?? 0));
     },
-    [serverDetail, localReturned],
+    [localReturned],
   );
 
   const setQty = useCallback(
-    (item: LocalInvoiceItem, qty: number) => {
-      const remaining = remainingFor(item);
+    (line: ReturnLine, qty: number) => {
+      const remaining = remainingFor(line);
       const clamped = Math.min(Math.max(qty, 0), remaining);
-      setQuantities(prev => ({...prev, [item.id]: clamped}));
+      setQuantities(prev => ({...prev, [line.key]: clamped}));
     },
     [remainingFor],
   );
 
-  const refundTotal = items.reduce((sum, item) => {
-    const qty = quantities[item.id] ?? 0;
-    return sum + item.unitPrice * qty;
+  const refundTotal = lines.reduce((sum, line) => {
+    const qty = quantities[line.key] ?? 0;
+    return sum + line.unitPrice * qty;
   }, 0);
-  const pickedCount = items.filter(
-    item => (quantities[item.id] ?? 0) > 0,
+  const pickedCount = lines.filter(
+    line => (quantities[line.key] ?? 0) > 0,
   ).length;
   const exchangeTotal = exchangePicks.reduce(
     (sum, pick) => sum + pick.unitPrice * pick.quantity,
@@ -732,12 +855,16 @@ function ReturnSheet({
     setBusy(true);
     const createdAt = localTimestamp();
     const clientRef = newClientRef(deviceId || 'dev');
-    const selected = items
-      .filter(item => (quantities[item.id] ?? 0) > 0)
-      .map(item => ({
-        saleItemId: item.id,
-        productId: item.productId,
-        quantity: quantities[item.id] ?? 0,
+    // v3.1: أسطر موحّدة — معرّف صنف الخادم عند معرفته (وإلا 0)
+    // + توقيع الصنف كاملاً ليحلّه الخادم بمطابقة دقيقة.
+    const selected = lines
+      .filter(line => (quantities[line.key] ?? 0) > 0)
+      .map(line => ({
+        saleItemId: line.serverItemId ?? 0,
+        productId: line.productId,
+        variantLabel: line.variantLabel,
+        unitName: line.unitName,
+        quantity: quantities[line.key] ?? 0,
       }));
     const exchangeLines = exchangeModeOn
       ? exchangePicks.map(pick => ({
@@ -751,20 +878,46 @@ function ReturnSheet({
     // قيمة العرض المحلية — الخادم يحسم بالأسعار الرسمية.
     const net = exchangeModeOn ? exchangeTotal - refundTotal : -refundTotal;
 
+    // v3.1: معرّف فاتورة الخادم من مرجع سحب الأجهزة الأخرى (srv-N).
+    const srvRefId = invoice.ref.startsWith('srv-')
+      ? Number(invoice.ref.slice(4)) || 0
+      : 0;
+
     // ① مباشرة (فاتورة متزامنة + اتصال).
     if (invoice.status === 'synced' && online) {
       try {
-        const list = await CashierApi.invoices(100, 0);
-        const hit = (list.invoices ?? []).find(
-          inv => inv.number === invoice.syncedNumber,
-        );
-        if (!hit) {
-          throw new Error('لم تُعثر الفاتورة عند الخادم');
+        // البحث برقم الفاتورة مباشرة أولاً (يشمل الأقدم من آخر 100)،
+        // ثم مسار القائمة كخطة بديلة.
+        let saleId = srvRefId;
+        if (saleId === 0 && invoice.syncedNumber != null) {
+          try {
+            const byNumber = await CashierApi.invoiceByNumber(
+              invoice.syncedNumber,
+            );
+            if (byNumber.invoice != null) {
+              saleId = byNumber.invoice.id;
+            }
+          } catch {
+            // نجرب مسار القائمة.
+          }
+        }
+        if (saleId === 0) {
+          const list = await CashierApi.invoices(100, 0);
+          const hit = (list.invoices ?? []).find(
+            inv => inv.number === invoice.syncedNumber,
+          );
+          if (!hit) {
+            throw new Error('لم تُعثر الفاتورة عند الخادم');
+          }
+          saleId = hit.id;
         }
         const payload = await CashierApi.return({
-          saleId: hit.id,
+          saleId,
           lines: selected.map(s => ({
             saleItemId: s.saleItemId,
+            productId: s.productId,
+            variantLabel: s.variantLabel,
+            unitName: s.unitName,
             quantity: s.quantity,
           })),
           exchange: exchangeLines,
@@ -800,7 +953,7 @@ function ReturnSheet({
       }
     }
 
-    // ② الطابور المحلي — يعمل حتى دون اتصال (saleClientRef).
+    // ② الطابور المحلي — يعمل حتى دون اتصال.
     try {
       await recordLocalOp({
         ref: clientRef,
@@ -811,8 +964,16 @@ function ReturnSheet({
         discount: 0,
         customerName: null,
         createdAt,
+        // v3.1: ربط المرتجع بفاتورته المصدر — به تُحسب المتبقي
+        // المحلي بدقة (كانت تعدّ مرتجعات فواتير أخرى بنفس المنتج).
+        sourceRef: invoice.ref,
         lines: selected.map(s => {
-          const item = items.find(i => i.id === s.saleItemId);
+          const item = lines.find(
+            l =>
+              l.productId === s.productId &&
+              (l.variantLabel ?? null) === (s.variantLabel ?? null) &&
+              (l.unitName ?? null) === (s.unitName ?? null),
+          );
           return {
             productId: s.productId,
             name: item?.name ?? `#${s.productId}`,
@@ -826,9 +987,14 @@ function ReturnSheet({
           };
         }),
         payload: {
-          saleClientRef: invoice.ref,
+          // فواتير الأجهزة الأخرى (srv-N): معرّف الخادم معروف من
+          // المرجع نفسه؛ فواتيرنا: يفهمها الخادم عبر saleClientRef.
+          ...(srvRefId > 0 ? {saleId: srvRefId} : {saleClientRef: invoice.ref}),
           lines: selected.map(s => ({
             saleItemId: s.saleItemId,
+            productId: s.productId,
+            variantLabel: s.variantLabel,
+            unitName: s.unitName,
             quantity: s.quantity,
           })),
           exchange: exchangeLines,
@@ -865,7 +1031,7 @@ function ReturnSheet({
     invoice.ref,
     invoice.status,
     invoice.syncedNumber,
-    items,
+    lines,
     onChanged,
     onClose,
     onToast,
@@ -901,31 +1067,33 @@ function ReturnSheet({
           style={{flex: 1}}
           contentContainerStyle={{gap: 8, paddingBottom: 8}}
           showsVerticalScrollIndicator={false}>
-          {items.map(item => {
-            const qty = quantities[item.id] ?? 0;
-            const remaining = remainingFor(item);
+          {lines.map(line => {
+            const qty = quantities[line.key] ?? 0;
+            const remaining = remainingFor(line);
             const step = stepFor(remaining);
             const fully = remaining <= 0;
             return (
               <View
-                key={item.id}
+                key={line.key}
                 style={[styles.lineCard, fully ? {opacity: 0.5} : null]}>
                 <View style={{flex: 1, minWidth: 0}}>
                   <Text style={styles.lineName} numberOfLines={2}>
-                    {item.name}
-                    {item.variantLabel ? ` (${item.variantLabel})` : ''}
-                    {item.unitName && item.unitName !== 'حبة'
-                      ? ` (${item.unitName})`
+                    {line.name}
+                    {line.variantLabel ? ` (${line.variantLabel})` : ''}
+                    {line.unitName &&
+                    line.unitName !== 'حبة' &&
+                    line.unitName !== 'قطعة'
+                      ? ` (${line.unitName})`
                       : ''}
                   </Text>
                   <Text style={styles.lineMeta}>
                     {fully
                       ? 'أُرجع كاملاً — لا متبقٍ'
-                      : `المتبقي قابل للإرجاع: ${formatQty(remaining)} · ${formatMoney(item.unitPrice)} للوحدة`}
+                      : `المتبقي قابل للإرجاع: ${formatQty(remaining)} · ${formatMoney(line.unitPrice)} للوحدة`}
                   </Text>
                   {qty > 0 ? (
                     <Text style={[styles.lineMeta, {color: c.warning}]}>
-                      قيمة الإرجاع: {formatMoney(item.unitPrice * qty)}
+                      قيمة الإرجاع: {formatMoney(line.unitPrice * qty)}
                     </Text>
                   ) : null}
                 </View>
@@ -933,7 +1101,7 @@ function ReturnSheet({
                   <Pressable
                     style={styles.stepBtn}
                     hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                    onPress={() => setQty(item, qty - step)}
+                    onPress={() => setQty(line, qty - step)}
                     disabled={busy || qty <= 0 || fully}>
                     <Icon name="minus" size={13} color={c.text} />
                   </Pressable>
@@ -941,14 +1109,14 @@ function ReturnSheet({
                   <Pressable
                     style={styles.stepBtn}
                     hitSlop={{top: 8, bottom: 8, left: 8, right: 8}}
-                    onPress={() => setQty(item, qty + step)}
+                    onPress={() => setQty(line, qty + step)}
                     disabled={busy || qty >= remaining || fully}>
                     <Icon name="plus" size={13} color={c.text} />
                   </Pressable>
                   <Pressable
                     style={styles.allBtn}
                     hitSlop={{top: 6, bottom: 6, left: 6, right: 6}}
-                    onPress={() => setQty(item, remaining)}
+                    onPress={() => setQty(line, remaining)}
                     disabled={busy || qty >= remaining || fully}>
                     <Text style={styles.allBtnText}>الكل</Text>
                   </Pressable>
@@ -1066,7 +1234,7 @@ function ReturnSheet({
           ) : null}
 
           <View style={styles.actionsRow}>
-            {items.length > 0 ? (
+            {lines.length > 0 ? (
               <Pressable
                 style={[
                   styles.exchangeCompactBtn,
@@ -1106,7 +1274,7 @@ function ReturnSheet({
               icon={exchangeModeOn ? 'swap' : 'undo'}
               onPress={() => void confirm()}
               loading={busy}
-              disabled={refundTotal <= 0 || pickedCount === 0}
+              disabled={busy || refundTotal <= 0 || pickedCount === 0}
               style={{flex: 1.6}}
             />
           </View>

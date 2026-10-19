@@ -48,6 +48,8 @@ export interface LocalInvoice {
   createdAt: string;
   syncedAt: string | null;
   rejectReason: string | null;
+  /** v3.1: للمرتجعات — مرجع فاتورة البيع المصدر (ربط دقيق). */
+  sourceRef: string | null;
 }
 
 export interface LocalInvoiceItem {
@@ -81,8 +83,17 @@ export async function initOfflineStore(): Promise<void> {
     customer_name TEXT,
     created_at TEXT NOT NULL,
     synced_at TEXT,
-    reject_reason TEXT
+    reject_reason TEXT,
+    source_ref TEXT
   )`);
+  // v3.1: ترحيل التثبيتات القديمة — عمود ربط المرتجع بفاتورته
+  // المصدر (ALTER TABLE ADD COLUMN آمن ومسكوك، والعمود موجود
+  // أصلاً في إنشاءات القواعد الجديدة).
+  try {
+    await localDb.run('ALTER TABLE invoices ADD COLUMN source_ref TEXT');
+  } catch {
+    // العمود موجود مسبقاً — لا شيء لنفعله.
+  }
   await localDb.run(`CREATE TABLE IF NOT EXISTS invoice_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     invoice_ref TEXT NOT NULL,
@@ -216,14 +227,16 @@ export async function recordLocalOp(input: {
   createdAt: string;
   lines: DraftLine[];
   payload: Record<string, unknown>;
+  /** v3.1: للمرتجعات — فاتورة البيع المصدر (ربط المتبقي بدقة). */
+  sourceRef?: string | null;
 }): Promise<void> {
   await initOfflineStore();
   await localDb.tx([
     {
       sql: `INSERT INTO invoices
         (ref, kind, display_number, synced_number, status, pay_kind, total,
-         discount, customer_name, created_at, synced_at, reject_reason)
-       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, NULL, NULL)`,
+         discount, customer_name, created_at, synced_at, reject_reason, source_ref)
+       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       params: [
         input.ref,
         input.kind,
@@ -233,6 +246,7 @@ export async function recordLocalOp(input: {
         input.discount,
         input.customerName,
         input.createdAt,
+        input.sourceRef ?? null,
       ],
     },
     ...input.lines.map(line => ({
@@ -349,7 +363,8 @@ export async function listInvoices(limit = 100): Promise<LocalInvoice[]> {
   await initOfflineStore();
   const rows = await localDb.select(
     `SELECT ref, kind, display_number, synced_number, status, pay_kind,
-            total, discount, customer_name, created_at, synced_at, reject_reason
+            total, discount, customer_name, created_at, synced_at, reject_reason,
+            source_ref
      FROM invoices ORDER BY created_at DESC, ref DESC LIMIT ?`,
     [limit],
   );
@@ -372,6 +387,7 @@ function rowToInvoice(row: DbRow): LocalInvoice {
     createdAt: String(row.created_at ?? ''),
     syncedAt: row.synced_at == null ? null : String(row.synced_at),
     rejectReason: row.reject_reason == null ? null : String(row.reject_reason),
+    sourceRef: row.source_ref == null ? null : String(row.source_ref),
   };
 }
 
@@ -396,26 +412,50 @@ export async function invoiceItems(ref: string): Promise<LocalInvoiceItem[]> {
   }));
 }
 
-/** إجمالي المرتجعات المسجلة محلياً من فاتورة معينة (حتى الآن). */
+/**
+ * v3.1 (الجولة 65) — إجمالي الكميات المُرجعة من فاتورة بيع محددة.
+ *
+ * الجذر القديم (منع الإرجاع بلا سبب ظاهر): كان الاستعلام يعدّ كل
+ * مرتجع لأي فاتورة أخرى يشترك معها في رقم المنتج نفسه — فبعد
+ * إرجاع منتج من فاتورة (أ) كان «المتبقي» في فاتورة (ب) ينقص
+ * أيضاً، حتى لو كانت فاتورة مختلفة تماماً. والأسوأ: حين يكون
+ * للخادم متبقٍ رسمي (يشمل المرتجعات المتزامنة) كان يُخصم منه
+ * المرتجع نفسه مرة ثانية → المتبقي صفر → «لا يسمح بالإرجاع».
+ *
+ * الربط الآن بعمود source_ref (فاتورة المصدر) — والتطابق
+ * الدقيق للصنف: product_id + variant_label + unit_name معاً.
+ *
+ * onlyPending: عند وجود لقطة رسمية للخادم (serverDetail) تكون
+ * المرتجعات المتزامنة محسوبة داخلها أصلاً — فلا نعدّ سوى
+ * المرتجعات المحلية التي لم تصل الخادم بعد. بلا لقطة خادم
+ * نعدّ كل مرتجعات هذه الفاتورة (متزامنة ومعلقة) فوق الكمية
+ * الأصلية المحلية.
+ */
 export async function returnedQtyForLine(
   invoiceRef: string,
   productId: number,
   variantLabel: string | null,
+  unitName: string | null,
+  onlyPending = false,
 ): Promise<number> {
   await initOfflineStore();
+  const statusFilter = onlyPending
+    ? "AND i.status = 'pending'"
+    : "AND i.status != 'rejected'";
   const rows = await localDb.select(
     `SELECT ii.quantity AS q
      FROM invoice_items ii
      JOIN invoices i ON i.ref = ii.invoice_ref
-     WHERE i.kind = 'return' AND i.status != 'rejected'
-       AND ii.invoice_ref != ?
-       AND EXISTS (
-         SELECT 1 FROM invoice_items src
-         WHERE src.invoice_ref = ? AND src.product_id = ii.product_id
+     WHERE i.kind = 'return' ${statusFilter}
+       AND i.source_ref = ?
+       AND ii.product_id = ?
+       AND (
+         (? IS NULL AND ii.variant_label IS NULL) OR ii.variant_label = ?
        )
-       AND (? IS NULL AND ii.variant_label IS NULL
-            OR ii.variant_label = ?)`,
-    [invoiceRef, invoiceRef, variantLabel, variantLabel],
+       AND (
+         (? IS NULL AND ii.unit_name IS NULL) OR ii.unit_name = ?
+       )`,
+    [invoiceRef, productId, variantLabel, variantLabel, unitName, unitName],
   );
   // تقريب صارم: نعيد ما سُجَّل فعلاً — دقة الرفض النهائية عند
   // الخادم وقت المزامنة (prepareReturn يقيد المتبقي الحقيقي).

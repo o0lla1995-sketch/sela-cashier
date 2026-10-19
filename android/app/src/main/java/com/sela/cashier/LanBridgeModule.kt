@@ -4,7 +4,11 @@ import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.media.AudioManager
+import android.media.ToneGenerator
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import com.facebook.react.bridge.Arguments
 import com.facebook.react.bridge.BaseActivityEventListener
@@ -35,6 +39,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  *    جهاز الكاشير ويوافق عليه مرة واحدة.
  *  • storage: تخزين محلي بسيط (SharedPreferences) لجلسة الدخول —
  *    بلا أي مكتبة خارجية.
+ *  • v3.1 beep(kind): نغمة تأكيد قصيرة من مكبر الجهاز (نفس
+ *    PlatformUtilsModule في نقطة البيع أندرويد حرفياً) — تُعزف
+ *    عند مسح باركود ناجح وعند إضافة منتج للسلة (طلب الجولة 65).
  */
 class LanBridgeModule(reactContext: ReactApplicationContext) :
   ReactContextBaseJavaModule(reactContext) {
@@ -149,6 +156,51 @@ class LanBridgeModule(reactContext: ReactApplicationContext) :
   @ReactMethod
   fun deviceLabel(promise: Promise) {
     promise.resolve("${Build.MANUFACTURER} ${Build.MODEL}")
+  }
+
+  // ── v3.1: نغمة تأكيد (نفس أسلوب نقطة البيع أندرويد) ────────
+
+  /**
+   * نغمة قصيرة من مكبر الجهاز — kind:
+   * 0 = مسح/إضافة (TONE_PROP_BEEP) · 1 = مزدوجة · 2 = تأكيد ·
+   * 3 = خطأ (TONE_SUP_ERROR). ToneGenerator يجب إنشاؤه واستخدامه
+   * من خيط له Looper (خيط الواجهة دائماً لديه واحد).
+   */
+  @ReactMethod
+  fun beep(kind: Double, promise: Promise) {
+    try {
+      val tone = when (kind.toInt()) {
+        1 -> ToneGenerator.TONE_PROP_BEEP2
+        2 -> ToneGenerator.TONE_PROP_ACK
+        3 -> ToneGenerator.TONE_SUP_ERROR
+        else -> ToneGenerator.TONE_PROP_BEEP
+      }
+      val handler = Handler(Looper.getMainLooper())
+      handler.post {
+        var generator: ToneGenerator? = null
+        try {
+          generator = ToneGenerator(AudioManager.STREAM_MUSIC, 100)
+          generator.startTone(tone, 150)
+          // تحرير المورد بعد انتهاء النغمة.
+          handler.postDelayed({
+            try {
+              generator?.release()
+            } catch (_: Exception) {
+              // حُرّر مسبقاً.
+            }
+          }, 250)
+        } catch (t: Throwable) {
+          try {
+            generator?.release()
+          } catch (_: Exception) {
+            // حُرّر مسبقاً.
+          }
+        }
+      }
+      promise.resolve(true)
+    } catch (e: Exception) {
+      promise.resolve(false) // النغمة رفاهية — لا تعطل أي مسار أبداً.
+    }
   }
 
   /** معرّف ثابت للجهاز — به يوافق المدير على جهاز الكاشير مرة واحدة. */

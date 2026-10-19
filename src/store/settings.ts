@@ -7,6 +7,8 @@
  *    (تُرسل مع كل عملية بيع/إرجاع مباشرة؛ الخادم يتجاهلها إن لم
  *    تكن الطابعة متصلة).
  *  • fingerprintLock: الدخول للتطبيق بالبصمة عند الإقلاع.
+ *  • soundEnabled (v3.1): نغمة تأكيد عند مسح الباركود وإضافة
+ *    منتج للسلة — نفس سلوك نقطة البيع أندرويد.
  */
 import {create} from 'zustand';
 import {storageGet, storageSet} from '../native';
@@ -19,6 +21,7 @@ interface AppSettingsData {
   productView: ProductView;
   printReceipts: boolean;
   fingerprintLock: boolean;
+  soundEnabled: boolean;
 }
 
 interface AppSettingsState extends AppSettingsData {
@@ -27,12 +30,14 @@ interface AppSettingsState extends AppSettingsData {
   setProductView: (view: ProductView) => void;
   setPrintReceipts: (on: boolean) => void;
   setFingerprintLock: (on: boolean) => void;
+  setSoundEnabled: (on: boolean) => void;
 }
 
 const DEFAULTS: AppSettingsData = {
   productView: 'grid',
   printReceipts: false,
   fingerprintLock: false,
+  soundEnabled: true,
 };
 
 export const useAppSettings = create<AppSettingsState>((set, get) => ({
@@ -48,6 +53,7 @@ export const useAppSettings = create<AppSettingsState>((set, get) => ({
           productView: saved.productView ?? DEFAULTS.productView,
           printReceipts: saved.printReceipts ?? DEFAULTS.printReceipts,
           fingerprintLock: saved.fingerprintLock ?? DEFAULTS.fingerprintLock,
+          soundEnabled: saved.soundEnabled ?? DEFAULTS.soundEnabled,
         });
       } catch {
         // قيم افتراضية.
@@ -68,6 +74,11 @@ export const useAppSettings = create<AppSettingsState>((set, get) => ({
 
   setFingerprintLock(on) {
     set({fingerprintLock: on});
+    void persist(get());
+  },
+
+  setSoundEnabled(on) {
+    set({soundEnabled: on});
     void persist(get());
   },
 }));

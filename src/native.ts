@@ -32,6 +32,8 @@ interface LanBridgeNativeModule {
   discover(timeoutMs: number): Promise<DiscoveredPos[]>;
   deviceLabel(): Promise<string>;
   deviceId(): Promise<string>;
+  /** v3.1: نغمة تأكيد قصيرة — 0 مسح/إضافة · 1 مزدوجة · 2 تأكيد · 3 خطأ. */
+  beep(kind: number): Promise<boolean>;
   getItem(key: string): Promise<string | null>;
   setItem(key: string, value: string): Promise<boolean>;
   removeItem(key: string): Promise<boolean>;
@@ -91,6 +93,19 @@ export async function getDeviceId(): Promise<string> {
     return (await LanBridge?.deviceId()) ?? 'cashier-unknown';
   } catch {
     return 'cashier-unknown';
+  }
+}
+
+/**
+ * v3.1: نغمة تأكيد من مكبر الجهاز (طلب الجولة 65) — نفس نغمة نقطة
+ * البيع أندرويد عند مسح الباركود وإضافة المنتج للسلة. رفاهية لا
+ * تكسر شيئاً: أي خطأ يُبتلع بصمت.
+ */
+export function beep(kind: 0 | 1 | 2 | 3 = 0): void {
+  try {
+    void LanBridge?.beep(kind).catch(() => {});
+  } catch {
+    // النغمة لا تعطل أي مسار أبداً.
   }
 }
 

@@ -65,7 +65,7 @@ import {
 } from '../store/catalog';
 import {useSessionStore} from '../store/session';
 import {useAppSettings} from '../store/settings';
-import {scanProductBarcode} from '../native';
+import {beep, scanProductBarcode} from '../native';
 import {
   loadCachedCustomers,
   nextLocalNumber,
@@ -129,8 +129,13 @@ function ProductThumb({
   big?: boolean;
 }) {
   const c = useThemeColors();
-  // v2.1 — إصلاح الانهيار القاتل: كل الخطافات في أعلى المكون دائماً
-  // قبل أي return (درس «Rendered fewer hooks»).
+  // v3.1 — إصلاح الانهيار القاتل مع الصور (الجولة 65): الخطّاف
+  // useThumbHolderStyles يستدعي useThemeColors + useMemo — عددة
+  // الخطافات يجب أن تبقى ثابتة في كل مسارات الرسم. كان يُستدعى داخل
+  // فرع «لا صورة» فقط، فحين تصل الصورةasync ويتغير الفرع قبل
+  // الوصول إليه تنقص عدة الخطافات → «Rendered fewer hooks»
+  // → انهيار فوري. الحل: كل الخطافات في الأعلى دائماً قبل أي return.
+  const thumbStyles = useThumbHolderStyles();
   const [base64, setBase64] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
@@ -158,7 +163,7 @@ function ProductThumb({
   return (
     <View
       style={[
-        useThumbHolderStyles().placeholder,
+        thumbStyles.placeholder,
         {height, borderRadius: 10},
       ]}>
       {product.hasVariants ? (
@@ -170,7 +175,7 @@ function ProductThumb({
       ) : (
         <Text
           style={[
-            useThumbHolderStyles().glyph,
+            thumbStyles.glyph,
             {fontSize: big ? 30 : 22},
           ]}>
           {String(product.name ?? '').trim().charAt(0)}
@@ -802,6 +807,9 @@ export function SellScreen() {
   const pending = useSyncStore(s => s.pending);
   const productView = useAppSettings(s => s.productView);
   const printReceipts = useAppSettings(s => s.printReceipts);
+  // v3.1 (الجولة 65): نغمة تأكيد عند مسح الباركود/إضافة منتج —
+  // نفس سلوك نقطة البيع أندرويد، بقابلية إطفاء من الإعدادات.
+  const soundEnabled = useAppSettings(s => s.soundEnabled);
 
   const [search, setSearch] = useState('');
   const [searchFocused, setSearchFocused] = useState(false);
@@ -823,6 +831,13 @@ export function SellScreen() {
   } | null>(null);
   const searchRef = useRef<TextInput | null>(null);
   const prevLinesCountRef = useRef(0);
+  // v3.1 (الجولة 65): حارس متزامن ضد البيع المزدوج — ضغطتان
+  // سريعتان (تعليق/ضعف شبكة) لا تنتجان فاتورتين أبداً: المرجع
+  // يُفحص ويُضبط تزامنياً قبل أي await، بخلاف حالة busy التي
+  // تحتاج إعادة رسم.
+  const saleInFlightRef = useRef(false);
+  // v3.1: كتم رسالة تجاوز الخصم أثناء الكتابة المتتالية.
+  const lastDiscountToastRef = useRef(0);
 
   useEffect(() => {
     void hydrate();
@@ -855,6 +870,16 @@ export function SellScreen() {
   }, [products, search]);
 
   /**
+   * v3.1 (الجولة 65): نغمة تأكيد قصيرة — تُعزف عند مسح باركود
+   * يطابق منتجاً وعند نجاح إضافة أي منتج للسلة (نفس نقطة البيع).
+   */
+  const beepOnAdd = useCallback(() => {
+    if (soundEnabled) {
+      beep(0);
+    }
+  }, [soundEnabled]);
+
+  /**
    * فتح نافذة البيع المناسبة لمود المنتج — نفس تجان نقطة البيع:
    * وزن → لوحة الوزن · متغيرات/أحجام → نافذة البيع · بسيط → إضافة.
    */
@@ -881,11 +906,13 @@ export function SellScreen() {
       }
       // منتج بسيط — إضافة مباشرة (حارس المخزون يحسم).
       const result = cart.add(product, null, 1, null);
-      if (!result.ok && result.reason) {
+      if (result.ok) {
+        beepOnAdd();
+      } else if (result.reason) {
         toast(result.reason, 'error');
       }
     },
-    [cart, toast],
+    [cart, toast, beepOnAdd],
   );
 
   /** إضافة بالباركود (من الماسح أو بحث مطابق تماماً). */
@@ -904,9 +931,11 @@ export function SellScreen() {
         toast(`لا منتج بهذا الباركود (${query})`, 'error');
         return;
       }
+      // v3.1: نغمة مسح ناجح — لحظة تطابق الباركود (نقطة البيع).
+      beepOnAdd();
       openSaleSheet(hit);
     },
-    [products, openSaleSheet, toast],
+    [products, openSaleSheet, toast, beepOnAdd],
   );
 
   // بحث الباركود المطبوع: تطابق شبه كامل → مسار الباركود نفسه.
@@ -945,9 +974,43 @@ export function SellScreen() {
     }
   }, [scanBusy, addByBarcode]);
 
-  const maxDiscountMoney = useMemo(
-    () => (cart.subtotal() * perms.maxDiscountPct) / 100,
-    [cart, perms.maxDiscountPct],
+  /**
+   * v3.1 (الجولة 65): تطبيق الخصم بتحقق صريح — لا قصّ صامت بعد
+   * اليوم. تجاوز حدك (نسبة المسؤول) يوقف الإدخال عند الحد الأقصى
+   * مع رسالة واضحة، والخصم المقفول (0%) يُرفض كلياً. الرسالة
+   * تُكتم نصف ثانية كي لا تتكدس أثناء الكتابة المتتالية.
+   */
+  const applyDiscount = useCallback(
+    (rawValue: number) => {
+      if (perms.maxDiscountPct <= 0) {
+        cart.setDiscount(0);
+        setDiscountText('');
+        if (Date.now() - lastDiscountToastRef.current > 600) {
+          lastDiscountToastRef.current = Date.now();
+          toast('الخصم مقفول لحسابك — راجع المسؤول', 'error');
+        }
+        return;
+      }
+      const max = (cart.subtotal() * perms.maxDiscountPct) / 100;
+      if (rawValue > max + 0.0001) {
+        cart.setDiscount(max);
+        setDiscountText(String(Math.round(max * 100) / 100));
+        if (Date.now() - lastDiscountToastRef.current > 600) {
+          lastDiscountToastRef.current = Date.now();
+          toast(
+            `تجاوزت حد خصمك (${perms.maxDiscountPct}% = ${formatMoney(
+              max,
+            )}) — طُبّق الحد الأقصى`,
+            'error',
+          );
+        }
+        return;
+      }
+      const safe = Math.max(0, Math.round(rawValue * 100) / 100);
+      cart.setDiscount(safe);
+      setDiscountText(String(safe));
+    },
+    [cart, perms.maxDiscountPct, toast],
   );
 
   const completeSaleInner = useCallback(
@@ -961,10 +1024,21 @@ export function SellScreen() {
         quantity: line.quantity,
       }));
       const subtotal = cart.subtotal();
-      const discount = Math.min(
-        Math.max(0, cart.discount),
-        (subtotal * perms.maxDiscountPct) / 100,
-      );
+      // v3.1 (الجولة 65): تحقق صريح قبل البيع — لا يكتمل البيع
+      // أبداً بخصم يتجاوز نسبة المسؤول (كان يُقصّ بصمت فتمر الفاتورة).
+      const maxAllowed = (subtotal * perms.maxDiscountPct) / 100;
+      if (cart.discount > maxAllowed + 0.0001) {
+        toast(
+          perms.maxDiscountPct <= 0
+            ? 'الخصم مقفول لحسابك — احذفه قبل إتمام البيع'
+            : `الخصم يتجاوز حدك (${perms.maxDiscountPct}% = ${formatMoney(
+                maxAllowed,
+              )}) — عدّله قبل إتمام البيع`,
+          'error',
+        );
+        return;
+      }
+      const discount = Math.max(0, Math.min(cart.discount, maxAllowed));
       const total = Math.max(0, subtotal - discount);
       const customerName =
         paymentType === 'debt'
@@ -1082,17 +1156,25 @@ export function SellScreen() {
 
   const completeSale = useCallback(
     async (paymentType: 'cash' | 'debt', customerId?: number) => {
+      // v3.1 (الجولة 65): حارس متزامن أولاً — ضغطتان في نفس اللحظة
+      // (تعليق/ضعف اتصال) لا تنتجان فاتورتين. فحص المرجع يسبق أي
+      // await فلا يمر أي استدعاء ثانٍ حتى قبل إعادة الرسم.
+      if (saleInFlightRef.current) {
+        return;
+      }
       if (cart.lines.length === 0) {
         return;
       }
+      saleInFlightRef.current = true;
       setBusy(true);
       try {
         await completeSaleInner(paymentType, customerId);
       } finally {
+        saleInFlightRef.current = false;
         setBusy(false);
       }
     },
-    [completeSaleInner],
+    [completeSaleInner, cart.lines.length],
   );
 
   const itemsCount = cart.lines.reduce(
@@ -1569,49 +1651,52 @@ export function SellScreen() {
               </View>
 
               <View style={styles.discountRow}>
-                <Text style={styles.discountLabel}>خصم (₪)</Text>
+                <Text style={styles.discountLabel}>
+                  خصم (₪)
+                  {perms.maxDiscountPct > 0
+                    ? ` · حتى ${perms.maxDiscountPct}%`
+                    : ' · مقفول'}
+                </Text>
                 <TextInput
                   style={styles.discountInput}
                   value={discountText}
                   onChangeText={text => {
-                    setDiscountText(text);
                     const value = Number(text.replace(',', '.')) || 0;
-                    cart.setDiscount(Math.min(value, maxDiscountMoney));
+                    // v3.1: تحقق فوري — تجاوز الحد يُوقف عند الأقصى
+                    // برسالة واضحة (لا قصّ صامت بعد اليوم).
+                    applyDiscount(value);
                   }}
                   keyboardType="numeric"
                   placeholder="0"
                   placeholderTextColor={c.textFaint}
+                  editable={perms.maxDiscountPct > 0}
                 />
-                <Pressable
-                  style={styles.quickChip}
-                  onPress={() => {
-                    const next = cart.subtotal() * 0.05;
-                    cart.setDiscount(Math.min(next, maxDiscountMoney));
-                    setDiscountText(
-                      String(
-                        Math.round(
-                          Math.min(next, maxDiscountMoney) * 100,
-                        ) / 100,
-                      ),
-                    );
-                  }}>
-                  <Text style={styles.quickChipText}>5%</Text>
-                </Pressable>
-                <Pressable
-                  style={styles.quickChip}
-                  onPress={() => {
-                    const next = cart.subtotal() * 0.1;
-                    cart.setDiscount(Math.min(next, maxDiscountMoney));
-                    setDiscountText(
-                      String(
-                        Math.round(
-                          Math.min(next, maxDiscountMoney) * 100,
-                        ) / 100,
-                      ),
-                    );
-                  }}>
-                  <Text style={styles.quickChipText}>10%</Text>
-                </Pressable>
+                {perms.maxDiscountPct > 0 ? (
+                  <>
+                    <Pressable
+                      style={styles.quickChip}
+                      onPress={() => applyDiscount(cart.subtotal() * 0.05)}>
+                      <Text style={styles.quickChipText}>5%</Text>
+                    </Pressable>
+                    <Pressable
+                      style={styles.quickChip}
+                      onPress={() => applyDiscount(cart.subtotal() * 0.1)}>
+                      <Text style={styles.quickChipText}>10%</Text>
+                    </Pressable>
+                  </>
+                ) : null}
+                {cart.discount > 0 || discountText.length > 0 ? (
+                  <Pressable
+                    style={[styles.quickChip, styles.quickChipGhost]}
+                    onPress={() => {
+                      cart.setDiscount(0);
+                      setDiscountText('');
+                    }}>
+                    <Text style={[styles.quickChipText, {color: c.textDim}]}>
+                      إلغاء
+                    </Text>
+                  </Pressable>
+                ) : null}
                 <Text style={styles.totalText}>{formatMoney(cart.total())}</Text>
               </View>
 
@@ -1622,8 +1707,8 @@ export function SellScreen() {
                   icon="cart"
                   style={{flex: 1.4}}
                   onPress={() => void completeSale('cash')}
-                  loading={busy && online}
-                  disabled={busy && online}
+                  loading={busy}
+                  disabled={busy}
                 />
                 {perms.canDebt ? (
                   <AppButton
@@ -1653,7 +1738,10 @@ export function SellScreen() {
           onClose={() => setSaleProduct(null)}
           onAdd={(product, unitId, quantity, variantId) => {
             const result = cart.add(product, unitId, quantity, variantId);
-            if (!result.ok && result.reason) {
+            if (result.ok) {
+              // v3.1: نغمة إضافة ناجحة للسلة (نفس نقطة البيع).
+              beepOnAdd();
+            } else if (result.reason) {
               toast(result.reason, 'error');
             }
           }}
@@ -1672,6 +1760,8 @@ export function SellScreen() {
               toast(result.reason, 'error');
               return;
             }
+            // v3.1: نغمة إضافة ناجحة للسلة (نفس نقطة البيع).
+            beepOnAdd();
             setWeightProduct(null);
           }}
         />
@@ -2371,6 +2461,10 @@ const useStyles = makeStyles(c =>
       borderRadius: 999,
       paddingHorizontal: 10,
       paddingVertical: 6,
+    },
+    quickChipGhost: {
+      backgroundColor: 'transparent',
+      borderColor: c.borderSoft,
     },
     quickChipText: {
       color: c.accent,
