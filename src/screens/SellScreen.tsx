@@ -1762,62 +1762,53 @@ export function SellScreen() {
                 </ScrollView>
               </View>
 
+              {/* v3.3.1 (الجولة 76 #9c): سطر الخصم لوحده — بلا
+                  تسمية طويلة وبلا الإجمالي (طلب التاجر: «سطر الخصومات
+                  والنسب والادخال في صف لوحده والسعر الإجمالي بجانب زر
+                  البيع مع تقليل النصوص»). */}
               <View style={styles.discountRow}>
-                <Text style={styles.discountLabel}>
-                  خصم ({discountMode === 'amount' ? '₪' : '٪'})
-                  {perms.maxDiscountPct > 0
-                    ? ` · حتى ${perms.maxDiscountPct}%`
-                    : ' · مقفول'}
-                </Text>
-                {perms.maxDiscountPct > 0 ? (
-                  <Pressable
+                <Pressable
+                  style={[
+                    styles.quickChip,
+                    styles.discountModeChip,
+                    discountMode === 'pct' ? styles.quickChipActive : null,
+                  ]}
+                  onPress={() => {
+                    if (discountMode === 'amount') {
+                      const subtotal = cart.subtotal();
+                      const pct =
+                        subtotal > 0 && cart.discount > 0
+                          ? Math.round((cart.discount / subtotal) * 1000) / 10
+                          : 0;
+                      setDiscountMode('pct');
+                      setDiscountText('');
+                      setDiscountPctText(pct > 0 ? String(pct) : '');
+                    } else {
+                      setDiscountMode('amount');
+                      setDiscountPctText('');
+                      const amount = cart.discount;
+                      setDiscountText(
+                        amount > 0
+                          ? String(Math.round(amount * 100) / 100)
+                          : '',
+                      );
+                    }
+                  }}>
+                  <Text
                     style={[
-                      styles.quickChip,
-                      discountMode === 'pct' ? styles.quickChipActive : null,
-                    ]}
-                    onPress={() => {
-                      if (discountMode === 'amount') {
-                        // إلى النسبة: ابدأ من الخصم الحالي إن وُجد.
-                        const subtotal = cart.subtotal();
-                        const pct =
-                          subtotal > 0 && cart.discount > 0
-                            ? Math.round(
-                                (cart.discount / subtotal) * 1000,
-                              ) / 10
-                            : 0;
-                        setDiscountMode('pct');
-                        setDiscountText('');
-                        setDiscountPctText(pct > 0 ? String(pct) : '');
-                      } else {
-                        setDiscountMode('amount');
-                        setDiscountPctText('');
-                        const amount = cart.discount;
-                        setDiscountText(
-                          amount > 0
-                            ? String(Math.round(amount * 100) / 100)
-                            : '',
-                        );
-                      }
-                    }}>
-                    <Text
-                      style={[
-                        styles.quickChipText,
-                        discountMode === 'pct'
-                          ? {color: c.text}
-                          : {color: c.textDim},
-                      ]}>
-                      {discountMode === 'amount' ? '٪ نسبة' : '₪ مبلغ'}
-                    </Text>
-                  </Pressable>
-                ) : null}
+                      styles.quickChipText,
+                      discountMode === 'pct'
+                        ? {color: c.text}
+                        : {color: c.textDim},
+                    ]}>
+                    {discountMode === 'amount' ? '₪' : '٪'}
+                  </Text>
+                </Pressable>
                 <TextInput
                   style={styles.discountInput}
                   value={discountMode === 'amount' ? discountText : discountPctText}
                   onChangeText={text => {
                     const value = Number(text.replace(',', '.')) || 0;
-                    // v3.1: تحقق فوري — تجاوز الحد يُوقف عند الأقصى
-                    // برسالة واضحة (لا قصّ صامت بعد اليوم).
-                    // v3.2: النمطان — مبلغ ₪ أو نسبة ٪ من المجموع.
                     if (discountMode === 'amount') {
                       applyDiscount(value);
                     } else {
@@ -1825,7 +1816,7 @@ export function SellScreen() {
                     }
                   }}
                   keyboardType="numeric"
-                  placeholder="0"
+                  placeholder={discountMode === 'amount' ? 'خصم ₪' : 'خصم %'}
                   placeholderTextColor={c.textFaint}
                   editable={perms.maxDiscountPct > 0}
                 />
@@ -1854,7 +1845,9 @@ export function SellScreen() {
                       <Text style={styles.quickChipText}>10%</Text>
                     </Pressable>
                   </>
-                ) : null}
+                ) : (
+                  <Text style={styles.discountLockedHint}>مقفول</Text>
+                )}
                 {cart.discount > 0 ||
                 discountText.length > 0 ||
                 discountPctText.length > 0 ? (
@@ -1866,26 +1859,38 @@ export function SellScreen() {
                       setDiscountPctText('');
                     }}>
                     <Text style={[styles.quickChipText, {color: c.textDim}]}>
-                      إلغاء
+                      ×
                     </Text>
                   </Pressable>
                 ) : null}
-                <Text style={styles.totalText}>{formatMoney(cart.total())}</Text>
               </View>
 
+              {/* v3.3.1: الإجمالي الكبير بجانب زر البيع — يقرأه
+                  الكاشير بنظرة واحدة دون سطر إضافي. */}
               <View style={styles.checkoutRow}>
+                <View style={styles.checkoutTotalBox}>
+                  <Text style={styles.checkoutTotalLabel}>الإجمالي</Text>
+                  <Text style={styles.checkoutTotalValue}>
+                    {formatMoney(cart.total())}
+                  </Text>
+                  {cart.discount > 0 ? (
+                    <Text style={styles.checkoutTotalSub}>
+                      بعد خصم {formatMoney(cart.discount)}
+                    </Text>
+                  ) : null}
+                </View>
                 <AppButton
                   title="بيع"
                   variant="success"
                   icon="cart"
-                  style={{flex: 1.4}}
+                  style={{flex: 1.6}}
                   onPress={startCashSale}
                   loading={busy}
                   disabled={busy}
                 />
                 {perms.canDebt ? (
                   <AppButton
-                    title="بيع بالدين"
+                    title="بالدين"
                     variant="secondary"
                     icon="book"
                     style={{flex: 1}}
@@ -2737,15 +2742,23 @@ const useStyles = makeStyles(c =>
       textAlign: 'center',
     },
     removeBtn: {padding: 4},
+    /** v3.3.1 (الجولة 76 #9c): سطر الخصم المضغوط — مبدّل ₪/٪
+     *  مربع صغير + حقل + رقائق 5%/10% + إلغاء؛ بلا تسميات طويلة. */
     discountRow: {
       flexDirection: 'row',
       alignItems: 'center',
-      gap: 8,
+      gap: 7,
     },
-    discountLabel: {
-      color: c.textDim,
+    discountModeChip: {
+      paddingHorizontal: 0,
+      width: 42,
+      alignItems: 'center',
+      paddingVertical: 8,
+    },
+    discountLockedHint: {
+      color: c.textFaint,
       fontFamily: fonts.medium,
-      fontSize: typography.small,
+      fontSize: typography.micro + 1,
     },
     discountInput: {
       flex: 1,
@@ -2754,10 +2767,33 @@ const useStyles = makeStyles(c =>
       borderColor: c.border,
       borderRadius: 10,
       color: c.text,
-      fontFamily: fonts.regular,
+      fontFamily: fonts.bold,
+      fontSize: typography.body,
       paddingHorizontal: 10,
       paddingVertical: 7,
       textAlign: 'center',
+    },
+    /** v3.3.1: صندوق الإجمالي بجانب زر البيع. */
+    checkoutTotalBox: {
+      alignItems: 'flex-start',
+      justifyContent: 'center',
+      minWidth: 108,
+      gap: 1,
+    },
+    checkoutTotalLabel: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: typography.micro + 1,
+    },
+    checkoutTotalValue: {
+      color: c.accent,
+      fontFamily: fonts.black,
+      fontSize: typography.heading + 1,
+    },
+    checkoutTotalSub: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: typography.micro,
     },
     quickChip: {
       backgroundColor: c.surfaceAlt,

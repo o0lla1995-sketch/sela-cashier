@@ -27,7 +27,11 @@ import {
   Text,
   View,
 } from 'react-native';
-import Camera from 'react-native-camera-kit';
+// v3.3.1 (الجولة 76 #9b): التصدير المسمّى لا الافتراضي — الافتراضي
+// في camera-kit 18 هو CameraKit (وحدة NativeModules نفسها)، وكان
+// يُرسم كعنصر JSX فيرمي «Element type is invalid» فور فتح الشاشة
+// (رسالة «واجه خطأً في العرض») ولا تُفتح الكاميرا إطلاقاً.
+import {Camera, CameraType} from 'react-native-camera-kit';
 import {SafeAreaView} from 'react-native-safe-area-context';
 import {CashierApi} from '../api/client';
 import {beep} from '../native';
@@ -128,7 +132,7 @@ export function ScannerScreen({onClose}: {onClose: () => void}) {
         }>
         <Camera
           style={styles.camera}
-          cameraType="back"
+          cameraType={CameraType.Back}
           scanBarcode
           showFrame
           frameColor={c.accent}

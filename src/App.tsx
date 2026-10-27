@@ -154,6 +154,24 @@ const TABS: {key: TabKey; label: string; icon: IconName}[] = [
   {key: 'me', label: 'حسابي', icon: 'user'},
 ];
 
+/** v3.3.1 (الجولة 76 #9a): زر الماسح اللاسلكي انتقل من زاوية
+ *  الشاشة العائمة (كان يحجب المحتوى فوق شريط اللسانات) إلى مركز
+ *  شريط اللسانات نفسه — زر بارز مرفوع يجعل أهم ميزة للكاشير في
+ *  أبعد مكان عن الإبهامين وبلا أي حجب (طلب التاجر نصاً). */
+function ScannerDockButton({onPress}: {onPress: () => void}) {
+  const styles = useScannerDockStyles();
+  return (
+    <Pressable
+      style={styles.dock}
+      onPress={onPress}
+      accessibilityLabel="الماسح اللاسلكي لنقطة البيع"
+      android_ripple={{color: 'rgba(255,255,255,0.25)', borderless: true}}>
+      <Icon name="scan" size={24} color="#FFFFFF" />
+      <Text style={styles.dockLabel}>ماسح</Text>
+    </Pressable>
+  );
+}
+
 /** صف أزرار الرأس: المزامنة + شكل العرض + الوضع الليلي/النهاري. */
 function HeaderActions() {
   const c = useThemeColors();
@@ -255,36 +273,60 @@ function MainTabs() {
         {tab === 'stats' ? <StatsScreen /> : null}
         {tab === 'me' ? <MeScreen /> : null}
       </View>
-      {/* زر الماسح العائم — متاح من كل اللسانات، لا يلمس أي حالة. */}
-      <Pressable
-        style={styles.scannerFab}
-        onPress={() => setScannerOpen(true)}
-        accessibilityLabel="الماسح اللاسلكي لنقطة البيع">
-        <Icon name="scan" size={22} color="#FFFFFF" />
-      </Pressable>
+      {/* v3.3.1: شريط اللسانات بزر الماسح في مركزه — البيع
+          وفواتيري حوله من الجهتين. */}
       <SafeAreaView style={styles.tabBar} edges={['bottom']}>
-        {TABS.map(item => {
-          const active = tab === item.key;
-          return (
-            <Pressable
-              key={item.key}
-              style={[styles.tab, active ? styles.tabActive : null]}
-              onPress={() => setTab(item.key)}>
-              <Icon
-                name={item.icon}
-                size={21}
-                color={active ? c.accent : c.textFaint}
-              />
-              <Text
-                style={[
-                  styles.tabLabel,
-                  active ? {color: c.accent, fontFamily: fonts.bold} : null,
-                ]}>
-                {item.label}
-              </Text>
-            </Pressable>
-          );
-        })}
+        {TABS.filter(item => item.key === 'sell' || item.key === 'invoices').map(
+          item => {
+            const active = tab === item.key;
+            return (
+              <Pressable
+                key={item.key}
+                style={[styles.tab, active ? styles.tabActive : null]}
+                onPress={() => setTab(item.key)}>
+                <Icon
+                  name={item.icon}
+                  size={21}
+                  color={active ? c.accent : c.textFaint}
+                />
+                <Text
+                  style={[
+                    styles.tabLabel,
+                    active ? {color: c.accent, fontFamily: fonts.bold} : null,
+                  ]}>
+                  {item.label}
+                </Text>
+              </Pressable>
+            );
+          },
+        )}
+        <View style={styles.dockSlot}>
+          <ScannerDockButton onPress={() => setScannerOpen(true)} />
+        </View>
+        {TABS.filter(item => item.key === 'stats' || item.key === 'me').map(
+          item => {
+            const active = tab === item.key;
+            return (
+              <Pressable
+                key={item.key}
+                style={[styles.tab, active ? styles.tabActive : null]}
+                onPress={() => setTab(item.key)}>
+                <Icon
+                  name={item.icon}
+                  size={21}
+                  color={active ? c.accent : c.textFaint}
+                />
+                <Text
+                  style={[
+                    styles.tabLabel,
+                    active ? {color: c.accent, fontFamily: fonts.bold} : null,
+                  ]}>
+                  {item.label}
+                </Text>
+              </Pressable>
+            );
+          },
+        )}
       </SafeAreaView>
       <Modal
         visible={scannerOpen}
@@ -509,24 +551,14 @@ const useStyles = makeStyles(c =>
       borderTopWidth: 1,
       borderTopColor: c.borderSoft,
       flexDirection: 'row',
+      alignItems: 'center',
     },
-    /** v3.2: زر الماسح العائم — فوق شريط اللسانات بجهة اليسار
-     *  (بعيداً عن إبهام الكاشير الأيمن أثناء البيع). */
-    scannerFab: {
-      position: 'absolute',
-      bottom: 76,
-      left: 14,
-      width: 52,
-      height: 52,
-      borderRadius: 17,
-      backgroundColor: c.accent,
+    /** v3.3.1: حضن زر الماسح المركزي — نفس عرض اللسان الواحد
+     *  مع رفع الزر فوق حافة الشريط. */
+    dockSlot: {
+      flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
-      elevation: 6,
-      shadowColor: '#000',
-      shadowOpacity: 0.3,
-      shadowRadius: 6,
-      shadowOffset: {width: 0, height: 3},
     },
     tab: {
       flex: 1,
@@ -542,6 +574,33 @@ const useStyles = makeStyles(c =>
       color: c.textFaint,
       fontFamily: fonts.medium,
       fontSize: 11,
+    },
+  }),
+);
+
+const useScannerDockStyles = makeStyles(c =>
+  StyleSheet.create({
+    dock: {
+      alignItems: 'center',
+      justifyContent: 'center',
+      width: 58,
+      height: 58,
+      borderRadius: 19,
+      backgroundColor: c.accent,
+      marginTop: -22,
+      borderWidth: 4,
+      borderColor: c.surface,
+      elevation: 8,
+      shadowColor: '#000',
+      shadowOpacity: 0.35,
+      shadowRadius: 8,
+      shadowOffset: {width: 0, height: 4},
+      gap: 1,
+    },
+    dockLabel: {
+      color: '#FFFFFF',
+      fontFamily: fonts.bold,
+      fontSize: 10.5,
     },
   }),
 );
