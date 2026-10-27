@@ -57,11 +57,23 @@ export interface LocalInvoiceItem {
   invoiceRef: string;
   productId: number;
   name: string;
+  variantId: number | null;
   variantLabel: string | null;
   unitName: string | null;
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+}
+
+/** v3.2 (الجولة 74 #6): تسوية مخزون معلّقة (بالوحدات الأساس) —
+ *  عمليات بيعت/رُجعت محلياً ولم تصل نقطة البيع بعد. المتاح للعرض
+ *  = مخزون آخر مزامنة ناجحة + هذه التسويات؛ وبعد المزامنة يتعادل
+ *  تلقائياً (العملية تخرج من المعلّق ومخزون الخادم الجديد يشملها). */
+export interface PendingStockAdjustment {
+  productId: number;
+  variantId: number | null;
+  /** سالب للبيع، موجب لمرتجع — بالوحدات الأساس. */
+  deltaBase: number;
 }
 
 let initialized = false;
@@ -103,8 +115,24 @@ export async function initOfflineStore(): Promise<void> {
     unit_name TEXT,
     quantity REAL NOT NULL,
     unit_price REAL NOT NULL,
-    line_total REAL NOT NULL
+    line_total REAL NOT NULL,
+    variant_id INTEGER,
+    conversion REAL NOT NULL DEFAULT 1
   )`);
+  // v3.2: ترحيل التثبيتات القديمة — عمودا ربط المخزون المعلّق:
+  // معرّف المتغير ومعامل التحويل للوحدة الأساس (مسكوكان وآمنان).
+  try {
+    await localDb.run('ALTER TABLE invoice_items ADD COLUMN variant_id INTEGER');
+  } catch {
+    // موجود مسبقاً.
+  }
+  try {
+    await localDb.run(
+      'ALTER TABLE invoice_items ADD COLUMN conversion REAL NOT NULL DEFAULT 1',
+    );
+  } catch {
+    // موجود مسبقاً.
+  }
   await localDb.run(`CREATE INDEX IF NOT EXISTS idx_items_invoice
     ON invoice_items(invoice_ref)`);
   await localDb.run(`CREATE TABLE IF NOT EXISTS outbox (
@@ -208,6 +236,9 @@ export interface DraftLine {
   quantity: number;
   unitPrice: number;
   lineTotal: number;
+  /** v3.2: معامل التحويل للوحدة الأساس (لحساب المخزون المعلّق
+   *  بدقة أثناء العمل دون اتصال) — الافتراض 1 (قطعة). */
+  conversion?: number;
 }
 
 /**
@@ -252,8 +283,8 @@ export async function recordLocalOp(input: {
     ...input.lines.map(line => ({
       sql: `INSERT INTO invoice_items
         (invoice_ref, product_id, name, variant_label, unit_name,
-         quantity, unit_price, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+         quantity, unit_price, line_total, variant_id, conversion)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       params: [
         input.ref,
         line.productId,
@@ -263,6 +294,8 @@ export async function recordLocalOp(input: {
         line.quantity,
         line.unitPrice,
         line.lineTotal,
+        line.variantId ?? null,
+        line.conversion ?? 1,
       ],
     })),
     {
@@ -287,6 +320,50 @@ export async function pendingOps(limit = 30): Promise<OutboxOp[]> {
     [limit],
   );
   return rows.map(rowToOp);
+}
+
+/**
+ * v3.2 (الجولة 74 #6) — تسويات المخزون المعلّقة بالوحدات الأساس.
+ *
+ * مبدأ «آخر مزامنة ناجحة» (طلب التاجر نصاً): دون اتصال، يعمل
+ * التطبيق على مخزون آخر مزامنة، والعمليات المحلية تُخصم/تُرجع
+ * محلياً فوقه — بلا أي مساس بمخزون نقطة البيع الرئيسية (لا يتغير
+ * هناك شيء إلا لحظة المزامنة داخل معاملاتها المحروسة). الصيغة:
+ *
+ *   المتاح المعروض = مخزون آخر مزامنة + Σ(معلّق)
+ *
+ * وبعد المزامنة يتعادل الطرفان تلقائياً: العملية تغادر المعلّق
+ * ومخزون الخادم المسحوب يشملها أصلاً — لا ازدواج خصم أبداً.
+ */
+export async function pendingStockAdjustments(): Promise<
+  PendingStockAdjustment[]
+> {
+  await initOfflineStore();
+  const rows = await localDb.select(
+    `SELECT ii.product_id AS product_id,
+            ii.variant_id AS variant_id,
+            CASE WHEN i.kind = 'return' THEN 1 ELSE -1 END AS sign,
+            SUM(ii.quantity * COALESCE(ii.conversion, 1)) AS delta
+     FROM invoice_items ii
+     JOIN invoices i ON i.ref = ii.invoice_ref
+     WHERE i.status = 'pending'
+     GROUP BY ii.product_id, ii.variant_id`,
+  );
+  const merged = new Map<string, PendingStockAdjustment>();
+  for (const row of rows) {
+    const productId = Number(row.product_id ?? 0);
+    const variantId =
+      row.variant_id == null ? null : Number(row.variant_id);
+    const deltaBase = Number(row.delta ?? 0) * (Number(row.sign) === 1 ? 1 : -1);
+    const key = `${productId}:${variantId ?? '-'}`;
+    const existing = merged.get(key);
+    if (existing != null) {
+      existing.deltaBase += deltaBase;
+    } else {
+      merged.set(key, {productId, variantId, deltaBase});
+    }
+  }
+  return [...merged.values()];
 }
 
 function rowToOp(row: DbRow): OutboxOp {
@@ -395,7 +472,7 @@ export async function invoiceItems(ref: string): Promise<LocalInvoiceItem[]> {
   await initOfflineStore();
   const rows = await localDb.select(
     `SELECT id, invoice_ref, product_id, name, variant_label, unit_name,
-            quantity, unit_price, line_total
+            quantity, unit_price, line_total, variant_id, conversion
      FROM invoice_items WHERE invoice_ref = ? ORDER BY id ASC`,
     [ref],
   );
@@ -404,6 +481,7 @@ export async function invoiceItems(ref: string): Promise<LocalInvoiceItem[]> {
     invoiceRef: String(row.invoice_ref),
     productId: Number(row.product_id),
     name: String(row.name),
+    variantId: row.variant_id == null ? null : Number(row.variant_id),
     variantLabel: row.variant_label == null ? null : String(row.variant_label),
     unitName: row.unit_name == null ? null : String(row.unit_name),
     quantity: Number(row.quantity ?? 0),

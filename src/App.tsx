@@ -20,6 +20,7 @@ import {
   ActivityIndicator,
   Appearance,
   I18nManager,
+  Modal,
   Pressable,
   StyleSheet,
   Text,
@@ -46,6 +47,7 @@ import {SellScreen} from './screens/SellScreen';
 import {InvoicesScreen} from './screens/InvoicesScreen';
 import {StatsScreen} from './screens/StatsScreen';
 import {MeScreen} from './screens/MeScreen';
+import {ScannerScreen} from './screens/ScannerScreen';
 
 type TabKey = 'sell' | 'invoices' | 'stats' | 'me';
 
@@ -224,6 +226,10 @@ function MainTabs() {
   const styles = useStyles();
   const c = useThemeColors();
   const [tab, setTab] = useState<TabKey>('sell');
+  /** v3.2 (الجولة 74 #7): الماسح اللاسلكي — طبقة كاملة فوق كل
+   *  اللسانات: كاميرا الجوال ترسل الباركود لنقطة البيع سطح
+   *  المكتب، مستقلة تماماً عن مهام الكاشير المحلية. */
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   return (
     <View style={styles.root}>
@@ -249,6 +255,13 @@ function MainTabs() {
         {tab === 'stats' ? <StatsScreen /> : null}
         {tab === 'me' ? <MeScreen /> : null}
       </View>
+      {/* زر الماسح العائم — متاح من كل اللسانات، لا يلمس أي حالة. */}
+      <Pressable
+        style={styles.scannerFab}
+        onPress={() => setScannerOpen(true)}
+        accessibilityLabel="الماسح اللاسلكي لنقطة البيع">
+        <Icon name="scan" size={22} color="#FFFFFF" />
+      </Pressable>
       <SafeAreaView style={styles.tabBar} edges={['bottom']}>
         {TABS.map(item => {
           const active = tab === item.key;
@@ -273,6 +286,13 @@ function MainTabs() {
           );
         })}
       </SafeAreaView>
+      <Modal
+        visible={scannerOpen}
+        animationType="slide"
+        onRequestClose={() => setScannerOpen(false)}
+        statusBarTranslucent>
+        <ScannerScreen onClose={() => setScannerOpen(false)} />
+      </Modal>
       <Toaster />
     </View>
   );
@@ -489,6 +509,24 @@ const useStyles = makeStyles(c =>
       borderTopWidth: 1,
       borderTopColor: c.borderSoft,
       flexDirection: 'row',
+    },
+    /** v3.2: زر الماسح العائم — فوق شريط اللسانات بجهة اليسار
+     *  (بعيداً عن إبهام الكاشير الأيمن أثناء البيع). */
+    scannerFab: {
+      position: 'absolute',
+      bottom: 76,
+      left: 14,
+      width: 52,
+      height: 52,
+      borderRadius: 17,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
+      elevation: 6,
+      shadowColor: '#000',
+      shadowOpacity: 0.3,
+      shadowRadius: 6,
+      shadowOffset: {width: 0, height: 3},
     },
     tab: {
       flex: 1,

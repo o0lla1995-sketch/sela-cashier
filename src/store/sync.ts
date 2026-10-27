@@ -38,6 +38,7 @@ import {
   setLastSyncAt,
   setPullCursor,
 } from './offline';
+import {refreshPendingStockAdjustments} from './catalog';
 import {useSessionStore} from './session';
 import type {SyncOpResult} from '../api/types';
 
@@ -178,6 +179,10 @@ export const useSyncStore = create<SyncState & SyncActions>((set, get) => ({
         pending: await pendingCount(),
         lastError: null,
       });
+      // v3.2 (الجولة 74 #6): بعد المزامنة الناجحة يتعادل المخزون —
+      // العمليات غادرت المعلّق ومخزون الخادم المسحوب يشملها؛ إعادة
+      // حساب التسويات كي لا يبقى أثر محلي فوق رصيد أصبح رسمياً.
+      await refreshPendingStockAdjustments();
     } finally {
       set({pushing: false});
     }

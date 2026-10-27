@@ -1,6 +1,6 @@
 {
   "name": "SelaCashier",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "private": true,
   "scripts": {
     "android": "react-native run-android",
@@ -12,6 +12,7 @@
   "dependencies": {
     "react": "18.3.1",
     "react-native": "0.77.3",
+    "react-native-camera-kit": "18.0.1",
     "react-native-safe-area-context": "^5.10.1",
     "react-native-svg": "^15.12.1",
     "zustand": "^5.0.15"

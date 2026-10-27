@@ -156,6 +156,20 @@ export const CashierApi = {
     return request('GET', '/api/catalog');
   },
 
+  /**
+   * v3.2 (الجولة 74 #7): الماسح اللاسلكي — إرسال باركود مقروء
+   * بكاميرا الجوال إلى نقطة البيع سطح المكتب، فيُعامل تماماً
+   * كماسح USB (إضافة للسلة عند البيع / تعبئة حقل الباركود عند
+   * إضافة المنتجات). مستقل كلياً عن مهام الكاشير المحلية.
+   * الرد: injected (وصل الموجّه) + known/productName (للتغذية
+   * الراجعة على الجوال).
+   */
+  scan(
+    code: string,
+  ): Promise<{ok: boolean; injected: boolean; known: boolean; productName: string | null}> {
+    return request('POST', '/api/scan', {body: {code}, timeoutMs: 6000});
+  },
+
   async findByBarcode(
     barcode: string,
   ): Promise<CatalogProduct | null> {

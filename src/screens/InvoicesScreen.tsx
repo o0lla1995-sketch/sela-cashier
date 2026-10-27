@@ -62,6 +62,7 @@ import {
 } from '../store/offline';
 import {
   linePrice,
+  refreshPendingStockAdjustments,
   useCatalogStore,
   variantLabel as makeVariantLabel,
   variantPrice,
@@ -974,16 +975,36 @@ function ReturnSheet({
               (l.variantLabel ?? null) === (s.variantLabel ?? null) &&
               (l.unitName ?? null) === (s.unitName ?? null),
           );
+          // v3.2: حل معامل التحويل ومعرّف المتغير من الكتالوج
+          // المحلي — لتسوية المخزون المعلّق للمرتجع بدقة (الخادم
+          // يفصلها نهائياً من فاتورة المصدر عند المزامنة).
+          const catalogProduct = useCatalogStore
+            .getState()
+            .products.find(p => p.id === s.productId);
+          const catalogVariant =
+            s.variantLabel != null && catalogProduct != null
+              ? catalogProduct.variants.find(
+                  v =>
+                    `${v.color} · ${v.size}` === s.variantLabel ||
+                    v.size === s.variantLabel,
+                )
+              : undefined;
+          const conversion =
+            catalogProduct != null && s.unitName != null
+              ? catalogProduct.units.find(u => u.name === s.unitName)
+                  ?.conversion ?? 1
+              : 1;
           return {
             productId: s.productId,
             name: item?.name ?? `#${s.productId}`,
-            variantId: item?.variantLabel ? -1 : null,
+            variantId: catalogVariant?.id ?? null,
             variantLabel: item?.variantLabel ?? null,
             unitId: null,
             unitName: item?.unitName ?? null,
             quantity: s.quantity,
             unitPrice: item?.unitPrice ?? 0,
             lineTotal: (item?.unitPrice ?? 0) * s.quantity,
+            conversion,
           };
         }),
         payload: {
@@ -1009,6 +1030,8 @@ function ReturnSheet({
           : 'سُجِّل المرتجع محلياً — يُزامَن فور عودة الاتصال',
         'success',
       );
+      // v3.2: المرتجع يعيد المخزون محلياً فوق آخر مزامنة فوراً.
+      void refreshPendingStockAdjustments();
       kickSync();
       onChanged();
       onClose();

@@ -57,6 +57,7 @@ import {
   availableStock,
   imageStore,
   linePrice,
+  refreshPendingStockAdjustments,
   sellableNow,
   useCartStore,
   useCatalogStore,
@@ -821,6 +822,11 @@ export function SellScreen() {
   );
   const [customerPicker, setCustomerPicker] = useState(false);
   const [discountText, setDiscountText] = useState('');
+  /** v3.2 (الجولة 74 #7): وضع إدخال الخصم — نسبة ٪ أو مبلغ ₪.
+   *  الافتراضي مبلغ (كما كان)؛ النسبة تحسب من مجموع السلة وتخضع
+   *  لنفس حد المسؤول (maxDiscountPct) الذي يفرضه الخادم. */
+  const [discountMode, setDiscountMode] = useState<'amount' | 'pct'>('amount');
+  const [discountPctText, setDiscountPctText] = useState('');
   const [busy, setBusy] = useState(false);
   const [scanBusy, setScanBusy] = useState(false);
   const [lastInvoice, setLastInvoice] = useState<{
@@ -955,6 +961,42 @@ export function SellScreen() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, products]);
+
+  /**
+   * v3.2: تطبيق خصم كنسبة مئوية — نفس تحقق الحد والرسائل الصريحة
+   *  لمسار المبلغ (لا قصّ صامت، والخصم المقفول يُرفض كلياً).
+   */
+  const applyDiscountPct = useCallback(
+    (rawPct: number) => {
+      if (perms.maxDiscountPct <= 0) {
+        cart.setDiscount(0);
+        setDiscountPctText('');
+        if (Date.now() - lastDiscountToastRef.current > 600) {
+          lastDiscountToastRef.current = Date.now();
+          toast('الخصم مقفول لحسابك — راجع المسؤول', 'error');
+        }
+        return;
+      }
+      if (rawPct > perms.maxDiscountPct + 0.0001) {
+        cart.setDiscount((cart.subtotal() * perms.maxDiscountPct) / 100);
+        setDiscountPctText(String(perms.maxDiscountPct));
+        if (Date.now() - lastDiscountToastRef.current > 600) {
+          lastDiscountToastRef.current = Date.now();
+          toast(
+            `تجاوزت حد خصمك (${perms.maxDiscountPct}%) — طُبّق الحد الأقصى`,
+            'error',
+          );
+        }
+        return;
+      }
+      const safePct = Math.max(0, Math.min(100, rawPct));
+      const amount =
+        Math.round(cart.subtotal() * (safePct / 100) * 100) / 100;
+      cart.setDiscount(amount);
+      setDiscountPctText(String(safePct));
+    },
+    [cart, perms.maxDiscountPct, toast],
+  );
 
   /** فتح ماسح الباركود الأصلي (نفس زر نقطة البيع). */
   const openScanner = useCallback(async () => {
@@ -1116,6 +1158,9 @@ export function SellScreen() {
             quantity: line.quantity,
             unitPrice: line.unitPrice,
             lineTotal: line.unitPrice * line.quantity,
+            // v3.2: معامل التحويل — لتسوية المخزون المعلّق محلياً
+            // بدقة الوحدات الأساس أثناء العمل دون اتصال.
+            conversion: line.conversion,
           })),
           payload: {
             lines,
@@ -1134,6 +1179,10 @@ export function SellScreen() {
         });
         cart.clear();
         setDiscountText('');
+        setDiscountPctText('');
+        // v3.2: تحديث تسويات المخزون المعلّق فوراً — المتاح المعروض
+        // ينقص (محلياً) لحظة البيع دون انتظار المزامنة.
+        void refreshPendingStockAdjustments();
         kickSync();
         toast(`سُجِّلت الفاتورة ${displayNumber} — بانتظار المزامنة`, 'success');
       } catch (error) {
@@ -1652,19 +1701,65 @@ export function SellScreen() {
 
               <View style={styles.discountRow}>
                 <Text style={styles.discountLabel}>
-                  خصم (₪)
+                  خصم ({discountMode === 'amount' ? '₪' : '٪'})
                   {perms.maxDiscountPct > 0
                     ? ` · حتى ${perms.maxDiscountPct}%`
                     : ' · مقفول'}
                 </Text>
+                {perms.maxDiscountPct > 0 ? (
+                  <Pressable
+                    style={[
+                      styles.quickChip,
+                      discountMode === 'pct' ? styles.quickChipActive : null,
+                    ]}
+                    onPress={() => {
+                      if (discountMode === 'amount') {
+                        // إلى النسبة: ابدأ من الخصم الحالي إن وُجد.
+                        const subtotal = cart.subtotal();
+                        const pct =
+                          subtotal > 0 && cart.discount > 0
+                            ? Math.round(
+                                (cart.discount / subtotal) * 1000,
+                              ) / 10
+                            : 0;
+                        setDiscountMode('pct');
+                        setDiscountText('');
+                        setDiscountPctText(pct > 0 ? String(pct) : '');
+                      } else {
+                        setDiscountMode('amount');
+                        setDiscountPctText('');
+                        const amount = cart.discount;
+                        setDiscountText(
+                          amount > 0
+                            ? String(Math.round(amount * 100) / 100)
+                            : '',
+                        );
+                      }
+                    }}>
+                    <Text
+                      style={[
+                        styles.quickChipText,
+                        discountMode === 'pct'
+                          ? {color: c.text}
+                          : {color: c.textDim},
+                      ]}>
+                      {discountMode === 'amount' ? '٪ نسبة' : '₪ مبلغ'}
+                    </Text>
+                  </Pressable>
+                ) : null}
                 <TextInput
                   style={styles.discountInput}
-                  value={discountText}
+                  value={discountMode === 'amount' ? discountText : discountPctText}
                   onChangeText={text => {
                     const value = Number(text.replace(',', '.')) || 0;
                     // v3.1: تحقق فوري — تجاوز الحد يُوقف عند الأقصى
                     // برسالة واضحة (لا قصّ صامت بعد اليوم).
-                    applyDiscount(value);
+                    // v3.2: النمطان — مبلغ ₪ أو نسبة ٪ من المجموع.
+                    if (discountMode === 'amount') {
+                      applyDiscount(value);
+                    } else {
+                      applyDiscountPct(value);
+                    }
                   }}
                   keyboardType="numeric"
                   placeholder="0"
@@ -1675,22 +1770,37 @@ export function SellScreen() {
                   <>
                     <Pressable
                       style={styles.quickChip}
-                      onPress={() => applyDiscount(cart.subtotal() * 0.05)}>
+                      onPress={() => {
+                        if (discountMode === 'amount') {
+                          applyDiscount(cart.subtotal() * 0.05);
+                        } else {
+                          applyDiscountPct(5);
+                        }
+                      }}>
                       <Text style={styles.quickChipText}>5%</Text>
                     </Pressable>
                     <Pressable
                       style={styles.quickChip}
-                      onPress={() => applyDiscount(cart.subtotal() * 0.1)}>
+                      onPress={() => {
+                        if (discountMode === 'amount') {
+                          applyDiscount(cart.subtotal() * 0.1);
+                        } else {
+                          applyDiscountPct(10);
+                        }
+                      }}>
                       <Text style={styles.quickChipText}>10%</Text>
                     </Pressable>
                   </>
                 ) : null}
-                {cart.discount > 0 || discountText.length > 0 ? (
+                {cart.discount > 0 ||
+                discountText.length > 0 ||
+                discountPctText.length > 0 ? (
                   <Pressable
                     style={[styles.quickChip, styles.quickChipGhost]}
                     onPress={() => {
                       cart.setDiscount(0);
                       setDiscountText('');
+                      setDiscountPctText('');
                     }}>
                     <Text style={[styles.quickChipText, {color: c.textDim}]}>
                       إلغاء
@@ -2461,6 +2571,10 @@ const useStyles = makeStyles(c =>
       borderRadius: 999,
       paddingHorizontal: 10,
       paddingVertical: 6,
+    },
+    quickChipActive: {
+      borderColor: c.accent,
+      backgroundColor: c.surfaceAlt,
     },
     quickChipGhost: {
       backgroundColor: 'transparent',

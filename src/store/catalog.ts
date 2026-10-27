@@ -12,7 +12,12 @@
 import {create} from 'zustand';
 import {CashierApi} from '../api/client';
 import type {CatalogProduct, CatalogVariant} from '../api/types';
-import {cacheCatalog, loadCachedCatalog} from './offline';
+import {
+  cacheCatalog,
+  loadCachedCatalog,
+  pendingStockAdjustments,
+  type PendingStockAdjustment,
+} from './offline';
 import {LanBridge, localDb} from '../native';
 
 interface CatalogState {
@@ -99,6 +104,8 @@ export const useCatalogStore = create<CatalogState>((set, get) => ({
     if (cached.length > 0) {
       set({products: cached, fromCache: true, lastFetchAt: -1});
     }
+    // v3.2: تسويات العمليات المعلّقة فوق مخزون الكاش (دون اتصال).
+    await refreshPendingStockAdjustments();
     await get().refresh();
   },
 
@@ -219,6 +226,95 @@ export function linePrice(
   return pct > 0 ? Math.round(raw * (1 - pct / 100) * 100) / 100 : raw;
 }
 
+// ── تسويات المخزون المعلّقة (v3.2 — العمل دون اتصال) ────────────
+// عمليات بِيعت/رُجعت محلياً ولم تصل نقطة البيع بعد: تُطبّق فوق
+// مخزون آخر مزامنة ناجحة فيعرض التطبيق المتاح الحقيقي ويحرس
+// البيع ضده. بعد المزامنة تُصفّر تلقائياً (الخادم شملها).
+let pendingAdj: PendingStockAdjustment[] = [];
+const pendingAdjByProduct = new Map<number, PendingStockAdjustment[]>();
+const pendingAdjByVariant = new Map<number, number>();
+
+/** إعادة تحميل التسويات المعلّقة — تُستدعى بعد كل عملية محلية
+ *  وبعد كل دورة مزامنة وبعد الإقلاع. */
+export async function refreshPendingStockAdjustments(): Promise<void> {
+  try {
+    pendingAdj = await pendingStockAdjustments();
+  } catch {
+    pendingAdj = [];
+  }
+  pendingAdjByProduct.clear();
+  pendingAdjByVariant.clear();
+  for (const adj of pendingAdj) {
+    const list = pendingAdjByProduct.get(adj.productId) ?? [];
+    list.push(adj);
+    pendingAdjByProduct.set(adj.productId, list);
+    if (adj.variantId != null) {
+      pendingAdjByVariant.set(
+        adj.variantId,
+        (pendingAdjByVariant.get(adj.variantId) ?? 0) + adj.deltaBase,
+      );
+    }
+  }
+}
+
+/** تسوية الأساس لمنتج (كل متغيراته مضمنة داخل مخزون المنتج). */
+function productBaseAdjustment(productId: number): number {
+  let delta = 0;
+  for (const adj of pendingAdjByProduct.get(productId) ?? []) {
+    delta += adj.deltaBase;
+  }
+  return delta;
+}
+
+/** تسوية متغير بعينه (لون × مقاس). */
+function variantAdjustment(variantId: number): number {
+  return pendingAdjByVariant.get(variantId) ?? 0;
+}
+
+/**
+ * v3.2 — المخزون الفعلي فوق قاعدة معطاة (دالة خالصة قابلة
+ * للاختبار): مخزون آخر مزامنة + تسويات العمليات المعلّقة، بال
+ * وحدة السطر أو رصيد المتغير — نفس معادلة availableStock لكن
+ * بتسويات صريحة بدل المفهرسة الداخلية.
+ */
+export function stockWithAdjustments(
+  product: CatalogProduct,
+  adjustments: PendingStockAdjustment[],
+  unitId: number | null,
+  variantId: number | null,
+): number {
+  if (product.stockUntracked) {
+    return 999999;
+  }
+  let baseAdj = 0;
+  let varAdj = 0;
+  for (const adj of adjustments) {
+    if (adj.productId === product.id) {
+      baseAdj += adj.deltaBase;
+      if (variantId != null && adj.variantId === variantId) {
+        varAdj += adj.deltaBase;
+      }
+    }
+  }
+  if (variantId != null) {
+    const variant = product.variants.find(v => v.id === variantId);
+    if (variant != null) {
+      if (variant.kind === 'size') {
+        return Math.max(0, product.stockQty + baseAdj);
+      }
+      return Math.max(0, variant.stockQty + varAdj);
+    }
+  }
+  const effectiveBase = product.stockQty + baseAdj;
+  if (unitId != null) {
+    const unit = product.units.find(u => u.id === unitId);
+    if (unit != null && unit.conversion > 0) {
+      return Math.max(0, effectiveBase / unit.conversion);
+    }
+  }
+  return Math.max(0, effectiveBase);
+}
+
 /** سعر متغير — نفس toVariantLine/toSizedLine في نقطة البيع. */
 export function variantPrice(
   product: CatalogProduct,
@@ -241,28 +337,15 @@ export function variantLabel(variant: CatalogVariant): string {
     : variant.size;
 }
 
-/** المخزون المتاح لسطر (وحدة/متغير/أساس) — لعرض النفاد فقط. */
+/** المخزون المتاح لسطر (وحدة/متغير/أساس) — لعرض النفاد فقط.
+ *  v3.2: يشمل تسويات العمليات المعلّقة (بيع دون اتصال يخصم
+ *  محلياً ومرتجعه يرجع محلياً) فوق مخزون آخر مزامنة. */
 export function availableStock(
   product: CatalogProduct,
   unitId: number | null,
   variantId: number | null,
 ): number {
-  if (product.stockUntracked) {
-    return 999999;
-  }
-  if (variantId != null) {
-    const variant = product.variants.find(v => v.id === variantId);
-    if (variant != null) {
-      return variant.kind === 'size' ? product.stockQty : variant.stockQty;
-    }
-  }
-  if (unitId != null) {
-    const unit = product.units.find(u => u.id === unitId);
-    if (unit != null && unit.conversion > 0) {
-      return Math.max(0, product.stockQty / unit.conversion);
-    }
-  }
-  return Math.max(0, product.stockQty);
+  return stockWithAdjustments(product, pendingAdj, unitId, variantId);
 }
 
 // ── السلة ────────────────────────────────────────────────────────
@@ -458,7 +541,11 @@ function stockGuard(
             line.product.id === product.id && line.variantId == null,
         )
         .reduce((sum, line) => sum + line.quantity * line.conversion, 0);
-      const stock = Math.max(0, product.stockQty);
+      // v3.2: مخزون آخر مزامنة + المعلّق المحلي.
+      const stock = Math.max(
+        0,
+        product.stockQty + productBaseAdjustment(product.id),
+      );
       if (alreadyBase + quantity > stock + 0.0001) {
         const leftBase = Math.max(0, stock - alreadyBase);
         if (leftBase <= 0.0001) {
@@ -480,8 +567,10 @@ function stockGuard(
           line.product.id === product.id && line.variantId === variantId,
       )
       .reduce((sum, line) => sum + line.quantity, 0);
-    if (already + quantity > variant.stockQty + 0.0001) {
-      const left = Math.max(0, variant.stockQty - already);
+    // v3.2: رصيد المتغير + معلّقه المحلي.
+    const variantStock = variant.stockQty + variantAdjustment(variant.id);
+    if (already + quantity > variantStock + 0.0001) {
+      const left = Math.max(0, variantStock - already);
       if (left <= 0.0001) {
         return {
           ok: false,
@@ -502,7 +591,11 @@ function stockGuard(
   const alreadyBase = lines
     .filter(line => line.product.id === product.id && line.variantId == null)
     .reduce((sum, line) => sum + line.quantity * line.conversion, 0);
-  const stock = Math.max(0, product.stockQty);
+  // v3.2: مخزون آخر مزامنة + المعلّق المحلي.
+  const stock = Math.max(
+    0,
+    product.stockQty + productBaseAdjustment(product.id),
+  );
   if (alreadyBase + conversion * quantity > stock + 0.0001) {
     const leftBase = Math.max(0, stock - alreadyBase);
     if (leftBase <= 0.0001) {
@@ -526,13 +619,17 @@ export function sellableNow(product: CatalogProduct): boolean {
   if (product.stockUntracked) {
     return true;
   }
+  // v3.2: كل الأرصدة تشمل المعلّق المحلي (بيع دون اتصال يُرى فوراً).
+  const base = product.stockQty + productBaseAdjustment(product.id);
   if (product.hasVariants) {
-    if (product.stockQty > 0) {
+    if (base > 0) {
       return true;
     }
-    return product.variants.some(v => v.stockQty > 0);
+    return product.variants.some(
+      v => v.stockQty + variantAdjustment(v.id) > 0,
+    );
   }
-  return product.stockQty > 0;
+  return base > 0;
 }
 
 /** تفريغ أي مرجع قديم عند تسجيل الخروج. */
