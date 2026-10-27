@@ -33,6 +33,7 @@ import {
   StyleSheet,
   Text,
   TextInput,
+  TouchableOpacity,
   View,
 } from 'react-native';
 import {
@@ -821,6 +822,14 @@ export function SellScreen() {
     null,
   );
   const [customerPicker, setCustomerPicker] = useState(false);
+  /** v3.3 (الجولة 75): طرق الدفع من نقطة البيع — نافذة اختيار
+   *  الطريقة تفتح قبل إتمام البيع عند تفعيل بنوك/محافظ (طلب
+   *  التاجر الصريح لكل التطبيقات). تُجلب عند الاتصال وتبقى
+   *  مخبأة للعمل دون اتصال. */
+  const [payMethods, setPayMethods] = useState<
+    {id: string; label: string; kind: string; color: string}[]
+  >([{id: 'cash', label: 'نقدي', kind: 'cash', color: '#16A34A'}]);
+  const [payPicker, setPayPicker] = useState(false);
   const [discountText, setDiscountText] = useState('');
   /** v3.2 (الجولة 74 #7): وضع إدخال الخصم — نسبة ٪ أو مبلغ ₪.
    *  الافتراضي مبلغ (كما كان)؛ النسبة تحسب من مجموع السلة وتخضع
@@ -1056,7 +1065,11 @@ export function SellScreen() {
   );
 
   const completeSaleInner = useCallback(
-    async (paymentType: 'cash' | 'debt', customerId?: number) => {
+    async (
+      paymentType: 'cash' | 'debt',
+      customerId?: number,
+      paymentMethod?: string,
+    ) => {
       const createdAt = localTimestamp();
       const clientRef = newClientRef(deviceId || 'dev');
       const lines = cart.lines.map(line => ({
@@ -1096,6 +1109,7 @@ export function SellScreen() {
             lines,
             discount,
             paymentType,
+            paymentMethod,
             localCustomerId: customerId,
             clientRef,
             createdAt,
@@ -1166,6 +1180,7 @@ export function SellScreen() {
             lines,
             discount,
             paymentType,
+            paymentMethod,
             localCustomerId: customerId,
             clientRef,
             createdAt,
@@ -1204,7 +1219,11 @@ export function SellScreen() {
   );
 
   const completeSale = useCallback(
-    async (paymentType: 'cash' | 'debt', customerId?: number) => {
+    async (
+      paymentType: 'cash' | 'debt',
+      customerId?: number,
+      paymentMethod?: string,
+    ) => {
       // v3.1 (الجولة 65): حارس متزامن أولاً — ضغطتان في نفس اللحظة
       // (تعليق/ضعف اتصال) لا تنتجان فاتورتين. فحص المرجع يسبق أي
       // await فلا يمر أي استدعاء ثانٍ حتى قبل إعادة الرسم.
@@ -1217,7 +1236,7 @@ export function SellScreen() {
       saleInFlightRef.current = true;
       setBusy(true);
       try {
-        await completeSaleInner(paymentType, customerId);
+        await completeSaleInner(paymentType, customerId, paymentMethod);
       } finally {
         saleInFlightRef.current = false;
         setBusy(false);
@@ -1225,6 +1244,50 @@ export function SellScreen() {
     },
     [completeSaleInner, cart.lines.length],
   );
+
+  /** v3.3 (الجولة 75): جلب طرق الدفع المفعّلة من نقطة البيع عند
+   *  الاتصال (وتحديثها كل ربع ساعة) — تبقى مخبأة للعمل دون اتصال.
+   *  عند تفعيل بنوك/محافظ يفتح زر البيع نافذة اختيار الطريقة
+   *  أولاً — طلب التاجر الصريح لكل التطبيقات. */
+  useEffect(() => {
+    let cancelled = false;
+    const fetchMethods = async () => {
+      if (!online) {
+        return;
+      }
+      try {
+        const result = await CashierApi.paymentMethods();
+        if (
+          !cancelled &&
+          Array.isArray(result.methods) &&
+          result.methods.length > 0
+        ) {
+          setPayMethods(result.methods);
+        }
+      } catch {
+        // نقطة البيع قبل الإصدار الجديد أو انقطاع — النقدي يبقى.
+      }
+    };
+    void fetchMethods();
+    const timer = setInterval(() => void fetchMethods(), 15 * 60 * 1000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [online]);
+
+  /** v3.3: زر البيع — طرق متعددة تفتح الاختيار أولاً؛ نقدي وحده
+   *  يبيع مباشرة (سرعة البيع الصغير كما كان). */
+  const startCashSale = useCallback(() => {
+    if (busy || cart.lines.length === 0) {
+      return;
+    }
+    if (payMethods.length > 1) {
+      setPayPicker(true);
+      return;
+    }
+    void completeSale('cash', undefined, 'cash');
+  }, [busy, cart.lines.length, payMethods.length, completeSale]);
 
   const itemsCount = cart.lines.reduce(
     (sum, line) => sum + line.quantity,
@@ -1812,11 +1875,11 @@ export function SellScreen() {
 
               <View style={styles.checkoutRow}>
                 <AppButton
-                  title="بيع نقدي"
+                  title="بيع"
                   variant="success"
                   icon="cart"
                   style={{flex: 1.4}}
-                  onPress={() => void completeSale('cash')}
+                  onPress={startCashSale}
                   loading={busy}
                   disabled={busy}
                 />
@@ -1881,6 +1944,61 @@ export function SellScreen() {
           onClose={() => setCustomerPicker(false)}
           onPick={customer => void completeSale('debt', customer.id)}
         />
+      ) : null}
+
+      {/* v3.3 (الجولة 75): نافذة اختيار طريقة الدفع — تفتح قبل
+          إتمام البيع عند تفعيل بنوك/محافظ عند المدير (طلب التاجر
+          الصريح: «في كل التطبيقات سواء سطح المكتب أو أندرويد أو
+          كاشير»). النقدي وحده يبيع مباشرة بلا نافذة. */}
+      {payPicker ? (
+        <View style={styles.payOverlay}>
+          <TouchableOpacity
+            style={styles.payOverlayDim}
+            activeOpacity={1}
+            onPress={() => setPayPicker(false)}
+          />
+          <View style={styles.paySheet}>
+            <View style={styles.payHandle} />
+            <Text style={styles.payTitle}>اختر طريقة الدفع</Text>
+            <Text style={styles.payTotal}>
+              المطلوب: {formatMoney(cart.total())}
+            </Text>
+            <View style={styles.payGrid}>
+              {payMethods.map(m => (
+                <TouchableOpacity
+                  key={m.id}
+                  style={[styles.payCard, {borderColor: m.color + '55'}]}
+                  activeOpacity={0.7}
+                  onPress={() => {
+                    setPayPicker(false);
+                    void completeSale('cash', undefined, m.id);
+                  }}>
+                  <View
+                    style={[styles.payIconChip, {backgroundColor: m.color}]}>
+                    <Text style={styles.payIconMark}>
+                      {m.kind === 'cash' ? '₪' : m.label.slice(0, 2)}
+                    </Text>
+                  </View>
+                  <Text style={styles.payCardLabel} numberOfLines={1}>
+                    {m.label}
+                  </Text>
+                  <Text style={styles.payCardKind} numberOfLines={1}>
+                    {m.kind === 'cash'
+                      ? 'الخزينة النقدية'
+                      : m.kind === 'bank'
+                      ? 'تحويل بنكي'
+                      : 'محفظة إلكترونية'}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+            <AppButton
+              title="إلغاء"
+              variant="secondary"
+              onPress={() => setPayPicker(false)}
+            />
+          </View>
+        </View>
       ) : null}
 
       {/* نجاح الفاتورة */}
@@ -2241,6 +2359,83 @@ const useCustomerStyles = makeStyles(c =>
 const useStyles = makeStyles(c =>
   ({
     screen: {flex: 1, backgroundColor: c.bg},
+    /* v3.3 (الجولة 75): نافذة اختيار طريقة الدفع. */
+    payOverlay: {
+      ...StyleSheet.absoluteFillObject,
+      zIndex: 90,
+      elevation: 90,
+      justifyContent: 'flex-end',
+    },
+    payOverlayDim: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: 'rgba(0,0,0,0.55)',
+    },
+    paySheet: {
+      backgroundColor: c.surface,
+      borderTopLeftRadius: 22,
+      borderTopRightRadius: 22,
+      padding: spacing.lg,
+      gap: spacing.md,
+    },
+    payHandle: {
+      alignSelf: 'center',
+      width: 44,
+      height: 5,
+      borderRadius: 3,
+      backgroundColor: c.border,
+      marginBottom: -spacing.xs,
+    },
+    payTitle: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 18,
+      textAlign: 'center',
+    },
+    payTotal: {
+      color: c.accent,
+      fontFamily: fonts.bold,
+      fontSize: 16,
+      textAlign: 'center',
+    },
+    payGrid: {
+      flexDirection: 'row',
+      flexWrap: 'wrap',
+      gap: spacing.sm,
+    },
+    payCard: {
+      width: '31%',
+      minWidth: 100,
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: 7,
+      paddingVertical: 14,
+      paddingHorizontal: 6,
+      borderRadius: 14,
+      borderWidth: 2,
+      backgroundColor: c.surfaceAlt,
+    },
+    payIconChip: {
+      width: 44,
+      height: 44,
+      borderRadius: 11,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    payIconMark: {
+      color: '#FFFFFF',
+      fontFamily: fonts.bold,
+      fontSize: 15,
+    },
+    payCardLabel: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: 13,
+    },
+    payCardKind: {
+      color: c.textFaint,
+      fontFamily: fonts.regular,
+      fontSize: 10.5,
+    },
     searchRow: {
       flexDirection: 'row',
       gap: 8,

@@ -195,10 +195,23 @@ export const CashierApi = {
     return request('GET', '/api/customers');
   },
 
+  /** v3.3 (الجولة 75): طرق الدفع المفعّلة عند التاجر — يقرأها
+   *  الكاشير بعد الدخول ليعرض خيارات الدفع نفسها التي ضبطها
+   *  المدير (بنوك ومحافظ) في نافذة البيع. */
+  paymentMethods(): Promise<{
+    ok: boolean;
+    methods: {id: string; label: string; kind: string; color: string}[];
+  }> {
+    return request('GET', '/api/payment-methods');
+  },
+
   sale(input: {
     lines: SaleLineInput[];
     discount?: number;
     paymentType: 'cash' | 'debt';
+    /** v3.3 (الجولة 75): طريقة الدفع (بنك/محفظة) — يخزنها نقطة
+     *  البيع مع الفاتورة وتدخل أرصدة طرق الدفع. */
+    paymentMethod?: string;
     localCustomerId?: number;
     /** v2.0: مرجع فريد من هذا الجهاز (ميزة المزامنة). */
     clientRef?: string;
