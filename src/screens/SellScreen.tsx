@@ -67,6 +67,8 @@ import {
 } from '../store/catalog';
 import {useSessionStore} from '../store/session';
 import {useAppSettings} from '../store/settings';
+import {usePayMethodsStore} from '../store/payMethods';
+import {PaymentMethodLogo} from '../components/PaymentMethodLogo';
 import {beep, scanProductBarcode} from '../native';
 import {
   loadCachedCustomers,
@@ -822,13 +824,15 @@ export function SellScreen() {
     null,
   );
   const [customerPicker, setCustomerPicker] = useState(false);
-  /** v3.3 (الجولة 75): طرق الدفع من نقطة البيع — نافذة اختيار
-   *  الطريقة تفتح قبل إتمام البيع عند تفعيل بنوك/محافظ (طلب
-   *  التاجر الصريح لكل التطبيقات). تُجلب عند الاتصال وتبقى
-   *  مخبأة للعمل دون اتصال. */
-  const [payMethods, setPayMethods] = useState<
-    {id: string; label: string; kind: string; color: string}[]
-  >([{id: 'cash', label: 'نقدي', kind: 'cash', color: '#16A34A'}]);
+  /** v3.4 (الجولة 77 — كاشير #3): طرق الدفع من مخزن عالمي دائم —
+   *  كانت حالة محلية تُصفّ مع كل تبديل لسان فيعود «نقدي وحده»
+   *  حتى اكتمال الجلب، فتضيع نافذة اختيار الطريقة في البيع
+   *  الثاني (شكوى التاجر). الآن: ذاكرة الجلسة + تخزين محلي عبر
+   *  إعادة التشغيل + جلب فوري عند ضغطة البيع إن لزم. */
+  const payMethods = usePayMethodsStore(state => state.methods);
+  const hydratePayMethods = usePayMethodsStore(state => state.hydrate);
+  const refreshPayMethods = usePayMethodsStore(state => state.refresh);
+  const ensurePayMethods = usePayMethodsStore(state => state.ensureLoaded);
   const [payPicker, setPayPicker] = useState(false);
   const [discountText, setDiscountText] = useState('');
   /** v3.2 (الجولة 74 #7): وضع إدخال الخصم — نسبة ٪ أو مبلغ ₪.
@@ -1158,6 +1162,9 @@ export function SellScreen() {
           kind: 'sale',
           displayNumber,
           payKind: paymentType,
+          // v3.4 (الجولة 77): طريقة الدفع الفعلية مع الفاتورة
+          // المحلية — تظهر شارةً في «فواتيري» وتطابق نقطة البيع.
+          payMethod: paymentMethod ?? 'cash',
           total,
           discount,
           customerName,
@@ -1245,49 +1252,48 @@ export function SellScreen() {
     [completeSaleInner, cart.lines.length],
   );
 
-  /** v3.3 (الجولة 75): جلب طرق الدفع المفعّلة من نقطة البيع عند
-   *  الاتصال (وتحديثها كل ربع ساعة) — تبقى مخبأة للعمل دون اتصال.
+  /** v3.3 → v3.4 (الجولة 77): جلب طرق الدفع المفعّلة من نقطة
+   *  البيع عند الاتصال (وتحديثها كل ربع ساعة) — عبر المخزن
+   *  العالمي الدائم فلا تضيع بتبديل اللسانات أو إعادة التشغيل.
    *  عند تفعيل بنوك/محافظ يفتح زر البيع نافذة اختيار الطريقة
    *  أولاً — طلب التاجر الصريح لكل التطبيقات. */
   useEffect(() => {
-    let cancelled = false;
-    const fetchMethods = async () => {
-      if (!online) {
-        return;
-      }
-      try {
-        const result = await CashierApi.paymentMethods();
-        if (
-          !cancelled &&
-          Array.isArray(result.methods) &&
-          result.methods.length > 0
-        ) {
-          setPayMethods(result.methods);
-        }
-      } catch {
-        // نقطة البيع قبل الإصدار الجديد أو انقطاع — النقدي يبقى.
-      }
-    };
-    void fetchMethods();
-    const timer = setInterval(() => void fetchMethods(), 15 * 60 * 1000);
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
-  }, [online]);
+    void hydratePayMethods();
+  }, [hydratePayMethods]);
+  useEffect(() => {
+    if (!online) {
+      return;
+    }
+    void refreshPayMethods().catch(() => {
+      // نقطة البيع قبل الإصدار الجديد أو انقطاع — النسخة المخزنة
+      // (أو النقدي) تبقى.
+    });
+    const timer = setInterval(
+      () => void refreshPayMethods().catch(() => undefined),
+      15 * 60 * 1000,
+    );
+    return () => clearInterval(timer);
+  }, [online, refreshPayMethods]);
 
-  /** v3.3: زر البيع — طرق متعددة تفتح الاختيار أولاً؛ نقدي وحده
-   *  يبيع مباشرة (سرعة البيع الصغير كما كان). */
-  const startCashSale = useCallback(() => {
+  /** v3.3 → v3.4: زر البيع — طرق متعددة تفتح الاختيار أولاً؛ نقدي
+   *  وحده يبيع مباشرة (سرعة البيع الصغير كما كان). الجديد: إن كانت
+   *  القائمة لا تزال الافتراضية والاتصال قائم نجرّب جلبها الفوري
+   *  قبل البيع (مهلة ثانيتين ونصف) — فلا تُفقد نافذة الطرق أبداً
+   *  بعد أول اتصال وإن فُتح التطبيق للتو (شكوى التاجر نصاً). */
+  const startCashSale = useCallback(async () => {
     if (busy || cart.lines.length === 0) {
       return;
     }
-    if (payMethods.length > 1) {
+    let methods = payMethods;
+    if (methods.length <= 1 && online) {
+      methods = await ensurePayMethods();
+    }
+    if (methods.length > 1) {
       setPayPicker(true);
       return;
     }
     void completeSale('cash', undefined, 'cash');
-  }, [busy, cart.lines.length, payMethods.length, completeSale]);
+  }, [busy, cart.lines.length, payMethods, online, ensurePayMethods, completeSale]);
 
   const itemsCount = cart.lines.reduce(
     (sum, line) => sum + line.quantity,
@@ -1884,7 +1890,7 @@ export function SellScreen() {
                   variant="success"
                   icon="cart"
                   style={{flex: 1.6}}
-                  onPress={startCashSale}
+                  onPress={() => void startCashSale()}
                   loading={busy}
                   disabled={busy}
                 />
@@ -1978,12 +1984,17 @@ export function SellScreen() {
                     setPayPicker(false);
                     void completeSale('cash', undefined, m.id);
                   }}>
-                  <View
-                    style={[styles.payIconChip, {backgroundColor: m.color}]}>
-                    <Text style={styles.payIconMark}>
-                      {m.kind === 'cash' ? '₪' : m.label.slice(0, 2)}
-                    </Text>
-                  </View>
+                  {/* v3.4 (الجولة 77): الشعار الرسمي الحقيقي لكل بنك
+                      ومحفظة (أيقونة تطبيقها على Google Play) بدل
+                      حرفي الاسم — النقدي يبقى رقاقة ₪. */}
+                  {m.kind === 'cash' ? (
+                    <View
+                      style={[styles.payIconChip, {backgroundColor: m.color}]}>
+                      <Text style={styles.payIconMark}>₪</Text>
+                    </View>
+                  ) : (
+                    <PaymentMethodLogo methodId={m.id} size={44} />
+                  )}
                   <Text style={styles.payCardLabel} numberOfLines={1}>
                     {m.label}
                   </Text>

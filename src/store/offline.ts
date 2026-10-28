@@ -42,6 +42,10 @@ export interface LocalInvoice {
   status: 'pending' | 'synced' | 'rejected';
   /** بيع: cash|debt · مرتجع: refund|exchange */
   payKind: string;
+  /** v3.4 (الجولة 77 — كاشير #3): طريقة الدفع الفعلية (بنك/محفظة
+   *  أو نقدي) — تُخزن مع الفاتورة المحلية وتُعرض شارةً في أرشيف
+   *  الكاشير، فتطابق الفواتير نقطة البيع تماماً. */
+  payMethod: string;
   total: number;
   discount: number;
   customerName: string | null;
@@ -90,6 +94,7 @@ export async function initOfflineStore(): Promise<void> {
     synced_number TEXT,
     status TEXT NOT NULL DEFAULT 'pending',
     pay_kind TEXT NOT NULL,
+    payment_method TEXT,
     total REAL NOT NULL,
     discount REAL NOT NULL DEFAULT 0,
     customer_name TEXT,
@@ -105,6 +110,13 @@ export async function initOfflineStore(): Promise<void> {
     await localDb.run('ALTER TABLE invoices ADD COLUMN source_ref TEXT');
   } catch {
     // العمود موجود مسبقاً — لا شيء لنفعله.
+  }
+  // v3.4 (الجولة 77): عمود طريقة الدفع (بنك/محفظة) — ALTER آمن
+  // ومسكوك مثل source_ref تماماً.
+  try {
+    await localDb.run('ALTER TABLE invoices ADD COLUMN payment_method TEXT');
+  } catch {
+    // العمود موجود مسبقاً.
   }
   await localDb.run(`CREATE TABLE IF NOT EXISTS invoice_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +264,8 @@ export async function recordLocalOp(input: {
   kind: OpKind;
   displayNumber: string;
   payKind: string;
+  /** v3.4: طريقة الدفع الفعلية (بنك/محفظة/نقدي) للفواتير المحلية. */
+  payMethod?: string | null;
   total: number;
   discount: number;
   customerName: string | null;
@@ -265,14 +279,16 @@ export async function recordLocalOp(input: {
   await localDb.tx([
     {
       sql: `INSERT INTO invoices
-        (ref, kind, display_number, synced_number, status, pay_kind, total,
+        (ref, kind, display_number, synced_number, status, pay_kind,
+         payment_method, total,
          discount, customer_name, created_at, synced_at, reject_reason, source_ref)
-       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       params: [
         input.ref,
         input.kind,
         input.displayNumber,
         input.payKind,
+        input.payMethod ?? null,
         input.total,
         input.discount,
         input.customerName,
@@ -440,8 +456,8 @@ export async function listInvoices(limit = 100): Promise<LocalInvoice[]> {
   await initOfflineStore();
   const rows = await localDb.select(
     `SELECT ref, kind, display_number, synced_number, status, pay_kind,
-            total, discount, customer_name, created_at, synced_at, reject_reason,
-            source_ref
+            payment_method, total, discount, customer_name, created_at,
+            synced_at, reject_reason, source_ref
      FROM invoices ORDER BY created_at DESC, ref DESC LIMIT ?`,
     [limit],
   );
@@ -458,6 +474,7 @@ function rowToInvoice(row: DbRow): LocalInvoice {
       ? String(row.status)
       : 'pending') as LocalInvoice['status'],
     payKind: String(row.pay_kind ?? 'cash'),
+    payMethod: String(row.payment_method ?? 'cash') || 'cash',
     total: Number(row.total ?? 0),
     discount: Number(row.discount ?? 0),
     customerName: row.customer_name == null ? null : String(row.customer_name),
@@ -560,6 +577,8 @@ export async function mergeServerInvoices(
     itemCount: number;
     createdAt: string;
     clientRef?: string | null;
+    /** v3.4: طريقة الدفع الفعلية (بنك/محفظة أو نقدي). */
+    paymentMethod?: string | null;
   }[],
 ): Promise<number> {
   await initOfflineStore();
@@ -585,17 +604,21 @@ export async function mergeServerInvoices(
       }
     }
     // فاتورة من جهاز آخر لنفس الحساب — تُدرج كما هي.
+    // v3.4: طريقة الدفع الفعلية من الخادم (كانت «نقدي» مثبتة
+    // خطأً لكل فواتير الأجهزة الأخرى).
     await localDb.run(
       `INSERT OR IGNORE INTO invoices
-        (ref, kind, display_number, synced_number, status, pay_kind, total,
+        (ref, kind, display_number, synced_number, status, pay_kind,
+         payment_method, total,
          discount, customer_name, created_at, synced_at, reject_reason)
-       VALUES (?, ?, ?, ?, 'synced', ?, ?, ?, NULL, ?, ?, NULL)`,
+       VALUES (?, ?, ?, ?, 'synced', ?, ?, ?, ?, NULL, ?, ?, NULL)`,
       [
         invoice.clientRef ?? `srv-${invoice.id}`,
         invoice.isReturn ? 'return' : 'sale',
         invoice.number,
         invoice.number,
         'cash',
+        invoice.paymentMethod ?? 'cash',
         invoice.total,
         invoice.discount,
         invoice.createdAt,

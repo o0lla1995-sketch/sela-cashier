@@ -18,6 +18,17 @@
  *    أندرويد) — EAN-13/EAN-8/UPC/CODE128/CODE39/QR وغيرها.
  *  • تعمل من داخل الجلسة (بيع/فواتير/حساب) ومن شاشة الدخول إن
  *    كانت جلسة محفوظة — المهم رمز جلسة صالح واتصال بالنقطة.
+ *
+ * v3.4 (الجولة 77 #1): دقة وجهة القراءة وإصلاح فقد المسح المتسارع:
+ *  • الرد صار يميّز ثلاث حالات: كُتبت في الحقل المركز بنقطة البيع
+ *    (wedge — حقل الباركود بنموذج المنتج)، أو وصلت شاشة البيع
+ *    (أُضيفت للسلة/منتج معروف)، أو لم تستقبلها نقطة البيع أصلاً —
+ *    وتظهر رسالة صريحة بدل «غير معروف لنقطة البيع» المضللة التي
+ *    كانت تظهر عند مسح منتج جديد لتعبئة حقل الباركود.
+ *  • قراءتان متتابعتان سريعتان لم تعد تُهدر: القراءة الثانية أثناء
+ *    طلب جارٍ تُصفّ في طابور (آخر قراءة تنتظر) وتُرسل فور انتهاء
+ *    الأولى — كان حاجب التكرار يُحدَّث قبلها فتُهدر مرتين.
+ *  • الكود القصير (<4) صار يظهر في السجل بوضوح بدل التجاهل الصامت.
  */
 import React, {useCallback, useRef, useState} from 'react';
 import {
@@ -45,10 +56,13 @@ const DEDUPE_MS = 1600;
 /** أقصى عدد قراءات في سجل الشاشة. */
 const HISTORY_LIMIT = 12;
 
+/** نتيجة واحدة في سجل القراءات — وجهة واضحة لكل قراءة. */
 interface ScanRecord {
   code: string;
-  productName: string | null;
-  known: boolean;
+  /** رسالة الحالة الجاهزة للعرض. */
+  status: string;
+  /** نجاح (صوت مختلف + لون) أم تنبيه؟ */
+  ok: boolean;
   at: string;
 }
 
@@ -65,60 +79,125 @@ export function ScannerScreen({onClose}: {onClose: () => void}) {
   const [sentCount, setSentCount] = useState(0);
   const lastScanRef = useRef<{code: string; at: number} | null>(null);
   const inFlightRef = useRef(false);
+  /** v3.4: آخر قراءة وصلت أثناء طلب جارٍ — تُرسل فور فراغ الطابق. */
+  const queuedRef = useRef<string | null>(null);
 
-  /** إرسال باركود واحد لنقطة البيع — مع حاجب التكرار والحماية من
-   *  الازدواج أثناء طلب جارٍ. */
-  const sendCode = useCallback(async (rawCode: string) => {
-    const code = rawCode.trim();
-    if (code.length < 4) {
-      return;
-    }
-    const now = Date.now();
-    if (
-      lastScanRef.current != null &&
-      lastScanRef.current.code === code &&
-      now - lastScanRef.current.at < DEDUPE_MS
-    ) {
-      return; // نفس الكود خلال الحاجب — ثبات الكاميرا لا يكرر.
-    }
-    lastScanRef.current = {code, at: now};
-    if (inFlightRef.current) {
-      return; // طلب سابق جارٍ — القراءة التالية لحظتها.
-    }
-    inFlightRef.current = true;
-    setSending(true);
-    setErrorText(null);
-    try {
-      const result = await CashierApi.scan(code);
-      beep(result.known ? 0 : 1);
-      setSentCount(count => count + 1);
-      setHistory(prev =>
-        [
-          {
-            code,
-            productName: result.productName,
-            known: result.known,
-            at: new Date().toLocaleTimeString('ar-EG', {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            }),
-          },
-          ...prev,
-        ].slice(0, HISTORY_LIMIT),
-      );
-    } catch (error) {
-      beep(2);
-      setErrorText(
-        error instanceof Error
-          ? error.message
-          : 'تعذر إرسال الباركود لنقطة البيع',
-      );
-    } finally {
-      inFlightRef.current = false;
-      setSending(false);
-    }
+  const nowTime = () =>
+    new Date().toLocaleTimeString('ar-EG', {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+  const pushRecord = useCallback((record: ScanRecord) => {
+    setHistory(prev => [record, ...prev].slice(0, HISTORY_LIMIT));
   }, []);
+
+  /** إرسال باركود واحد لنقطة البيع — حاجب تكرار + طابور انتظار
+   *  للقراءة المتسارعة (لا تُهدر أبداً). */
+  const sendCode = useCallback(
+    async (rawCode: string) => {
+      const code = rawCode.trim();
+      if (code.length < 4) {
+        // v3.4: الكود القصير يظهر في السجل بدل التجاهل الصامت —
+        // نقطة البيع ترفض أقصر من 4 محارف أصلاً.
+        beep(1);
+        pushRecord({
+          code: code.length === 0 ? '—' : code,
+          status: 'كود قصير — تتجاهله نقطة البيع (أقصر من 4)',
+          ok: false,
+          at: nowTime(),
+        });
+        return;
+      }
+      const now = Date.now();
+      if (
+        lastScanRef.current != null &&
+        lastScanRef.current.code === code &&
+        now - lastScanRef.current.at < DEDUPE_MS
+      ) {
+        return; // نفس الكود خلال الحاجب — ثبات الكاميرا لا يكرر.
+      }
+      if (inFlightRef.current) {
+        // v3.4: طلب جارٍ — لا نُهدر القراءة ولا نلمس حاجب التكرار:
+        // تُصفّ آخر قراءة وتُرسل فور انتهاء الجاري.
+        queuedRef.current = code;
+        return;
+      }
+      let current = code;
+      lastScanRef.current = {code: current, at: now};
+      inFlightRef.current = true;
+      setSending(true);
+      setErrorText(null);
+      try {
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const result = await CashierApi.scan(current);
+          if (result.wedge === true) {
+            // كُتبت القراءة داخل الحقل المركز بنقطة البيع (حقل
+            // الباركود بنموذج المنتج غالباً) — نجاح كامل حتى لو
+            // المنتج غير معروف (منتج جديد بطبيعته).
+            beep(0);
+            pushRecord({
+              code: current,
+              status: 'أُدخل في الحقل المركز بنقطة البيع',
+              ok: true,
+              at: nowTime(),
+            });
+          } else if (!result.injected) {
+            // لم تستقبلها نقطة البيع أصلاً — لا شاشة بيع ولا نموذج
+            // مفتوح عندهم (أو لوحة مبالغ مفتوحة). رسالة صريحة بدل
+            // «غير معروف» المضللة.
+            beep(1);
+            pushRecord({
+              code: current,
+              status: 'لم تستقبلها نقطة البيع — افتح شاشة البيع أو نموذج المنتج',
+              ok: false,
+              at: nowTime(),
+            });
+          } else if (result.known) {
+            beep(0);
+            pushRecord({
+              code: current,
+              status: result.productName ?? 'أُضيف لنقطة البيع',
+              ok: true,
+              at: nowTime(),
+            });
+          } else {
+            // وصلت شاشة البيع لكن لا منتج بهذا الباركود عندهم.
+            beep(1);
+            pushRecord({
+              code: current,
+              status: 'وصلت نقطة البيع — لا منتج بهذا الباركود لديهم',
+              ok: false,
+              at: nowTime(),
+            });
+          }
+          setSentCount(count => count + 1);
+          const queued = queuedRef.current;
+          queuedRef.current = null;
+          if (queued == null) {
+            break;
+          }
+          // القراءة المصفوفة تُرسل الآن بنفس الجلسة المفتوحة.
+          lastScanRef.current = {code: queued, at: Date.now()};
+          current = queued;
+        }
+      } catch (error) {
+        beep(2);
+        setErrorText(
+          error instanceof Error
+            ? error.message
+            : 'تعذر إرسال الباركود لنقطة البيع',
+        );
+      } finally {
+        inFlightRef.current = false;
+        queuedRef.current = null;
+        setSending(false);
+      }
+    },
+    [pushRecord],
+  );
 
   return (
     <View style={styles.screen}>
@@ -192,8 +271,8 @@ export function ScannerScreen({onClose}: {onClose: () => void}) {
         )}
         {!sending && errorText == null && (
           <Text style={styles.hintText}>
-            وجّه الكاميرا نحو الباركود — يُرسل فوراً إلى سطح المكتب كماسح
-            USB (عند البيع يضاف للسلة، وعند إضافة منتج يملأ حقل الباركود)
+            وجّه الكاميرا نحو الباركود — يصل سطح المكتب كماسح USB: عند البيع
+            يضاف للسلة، وعند التركيز على حقل (أو فتح نموذج منتج) يُكتب فيه
           </Text>
         )}
         <ScrollView
@@ -209,12 +288,12 @@ export function ScannerScreen({onClose}: {onClose: () => void}) {
               <Text
                 style={[
                   styles.historyName,
-                  record.known ? null : {color: c.textFaint},
+                  record.ok
+                    ? {color: c.text}
+                    : {color: record.code === '—' ? c.textFaint : '#FBBF24'},
                 ]}
                 numberOfLines={1}>
-                {record.known
-                  ? record.productName ?? 'منتج'
-                  : 'غير معروف لنقطة البيع'}
+                {record.status}
               </Text>
               <Text style={styles.historyTime}>{record.at}</Text>
             </View>
@@ -330,7 +409,7 @@ const useStyles = makeStyles(c => ({
   historyName: {
     color: c.text,
     fontSize: 12,
-    flex: 1.6,
+    flex: 1.9,
     textAlign: 'right',
   },
   historyTime: {color: c.textFaint, fontSize: 10.5},

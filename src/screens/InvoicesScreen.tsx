@@ -68,6 +68,8 @@ import {
   variantPrice,
 } from '../store/catalog';
 import type {CatalogProduct, InvoiceDetail, InvoiceLine} from '../api/types';
+import {usePayMethodsStore} from '../store/payMethods';
+import {PaymentMethodLogo} from '../components/PaymentMethodLogo';
 import {useSessionStore} from '../store/session';
 import {useAppSettings} from '../store/settings';
 import {scanProductBarcode} from '../native';
@@ -90,6 +92,28 @@ function withinPeriod(createdAt: string, period: Period): boolean {
   const weekAgo = new Date(now.getTime() - 6 * 86400000);
   const from = `${weekAgo.getFullYear()}-${pad(weekAgo.getMonth() + 1)}-${pad(weekAgo.getDate())}`;
   return day >= from && day <= today;
+}
+
+/** v3.4: تسمية طريقة الدفع من المخزن العالمي (تسميات الخادم)،
+ *  مع خريطة ثابتة احتياطية لأشهر الجهات. */
+const PM_LABEL_FALLBACK: Record<string, string> = {
+  bank_palestine: 'بنك فلسطين',
+  bank_quds: 'بنك القدس',
+  bank_islami: 'البنك الإسلامي',
+  jawwal_pay: 'جوال باي',
+  palpay: 'بال باي',
+  malchat: 'مال تشات',
+};
+
+function payMethodLabel(
+  id: string,
+  methods: {id: string; label: string}[],
+): string {
+  const hit = methods.find(m => m.id === id);
+  if (hit != null) {
+    return hit.label;
+  }
+  return PM_LABEL_FALLBACK[id] ?? id;
 }
 
 export function InvoicesScreen() {
@@ -143,6 +167,7 @@ export function InvoicesScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [invoices]);
 
+  const payMethods = usePayMethodsStore(state => state.methods);
   const filtered = useMemo(() => {
     if (!invoices) {
       return [];
@@ -398,6 +423,12 @@ export function InvoicesScreen() {
                     : invoice.kind === 'return'
                     ? ' · مرتجع'
                     : ''}
+                  {invoice.kind === 'sale' &&
+                  invoice.payKind === 'cash' &&
+                  invoice.payMethod != null &&
+                  invoice.payMethod !== 'cash'
+                    ? ` · ${payMethodLabel(invoice.payMethod, payMethods)}`
+                    : ''}
                   {invoice.customerName ? ` · ${invoice.customerName}` : ''}
                 </Text>
               </View>
@@ -525,6 +556,7 @@ function InvoiceDetailSheet({
   onChanged: () => void;
   onToast: (message: string, kind?: 'success' | 'error' | 'info') => void;
 }) {
+  const payMethods = usePayMethodsStore(state => state.methods);
   const c = useThemeColors();
   const styles = useDetailStyles();
   const [items, setItems] = useState<LocalInvoiceItem[]>([]);
@@ -665,6 +697,24 @@ function InvoiceDetailSheet({
                 : 'success'
             }
           />
+          {/* v3.4 (الجولة 77 — كاشير #3): شارة طريقة الدفع الفعلية —
+              بنك أو محفظة مفعّلة بشعارها الرسمي، فتطابق الفاتورة
+              نقطة البيع ولا يبدو كل شيء «نقدي». */}
+          {invoice.kind === 'sale' &&
+            invoice.payKind === 'cash' &&
+            invoice.payMethod != null &&
+            invoice.payMethod !== 'cash' && (
+              <View style={styles.pmBadge}>
+                <PaymentMethodLogo
+                  methodId={invoice.payMethod}
+                  label={payMethodLabel(invoice.payMethod, payMethods)}
+                  size={17}
+                />
+                <Text style={styles.pmBadgeText} numberOfLines={1}>
+                  {payMethodLabel(invoice.payMethod, payMethods)}
+                </Text>
+              </View>
+            )}
           {invoice.status === 'pending' ? (
             <Badge label="بانتظار المزامنة" tone="warning" />
           ) : null}
@@ -1895,6 +1945,23 @@ const useDetailStyles = makeStyles(c =>
       alignItems: 'center',
       gap: 6,
       flexWrap: 'wrap',
+    },
+    /* v3.4: شارة طريقة الدفع (بنك/محفظة) بشعارها الرسمي. */
+    pmBadge: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 7,
+      paddingVertical: 3,
+    },
+    pmBadgeText: {
+      color: c.text,
+      fontFamily: fonts.bold,
+      fontSize: typography.small - 0.5,
     },
     rejectBox: {
       flexDirection: 'row',

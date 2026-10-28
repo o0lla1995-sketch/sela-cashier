@@ -160,13 +160,24 @@ const TABS: {key: TabKey; label: string; icon: IconName}[] = [
  *  أبعد مكان عن الإبهامين وبلا أي حجب (طلب التاجر نصاً). */
 function ScannerDockButton({onPress}: {onPress: () => void}) {
   const styles = useScannerDockStyles();
+  const [pressed, setPressed] = useState(false);
   return (
     <Pressable
-      style={styles.dock}
+      style={[styles.dock, pressed ? styles.dockPressed : null]}
       onPress={onPress}
+      onPressIn={() => setPressed(true)}
+      onPressOut={() => setPressed(false)}
       accessibilityLabel="الماسح اللاسلكي لنقطة البيع"
       android_ripple={{color: 'rgba(255,255,255,0.25)', borderless: true}}>
-      <Icon name="scan" size={24} color="#FFFFFF" />
+      {/* v3.4: قوسا إطار الماسح حول أيقونة الباركود — هوية ماسح
+          واضحة بدل أيقونة عامة، وحلقة توهج ناعمة حول الزر. */}
+      <View style={styles.dockGlyphs}>
+        <View style={styles.dockBracketTL} />
+        <View style={styles.dockBracketTR} />
+        <View style={styles.dockBracketBL} />
+        <View style={styles.dockBracketBR} />
+        <Icon name="scan" size={21} color="#FFFFFF" />
+      </View>
       <Text style={styles.dockLabel}>ماسح</Text>
     </Pressable>
   );
@@ -580,22 +591,81 @@ const useStyles = makeStyles(c =>
 
 const useScannerDockStyles = makeStyles(c =>
   StyleSheet.create({
+    /* v3.4 (الجولة 77 — كاشير #2): الزر صُمم من جديد — أكبر قليلاً
+       بلون العلامة، حلقة توهج ناعمة، وقوسا إطار الماسح (viewfinder)
+       حول أيقونة الباركود، وانضغاط لطيف عند اللمس. */
     dock: {
       alignItems: 'center',
       justifyContent: 'center',
-      width: 58,
-      height: 58,
-      borderRadius: 19,
+      width: 62,
+      height: 62,
+      borderRadius: 21,
       backgroundColor: c.accent,
-      marginTop: -22,
+      marginTop: -24,
       borderWidth: 4,
       borderColor: c.surface,
-      elevation: 8,
-      shadowColor: '#000',
-      shadowOpacity: 0.35,
-      shadowRadius: 8,
-      shadowOffset: {width: 0, height: 4},
+      elevation: 10,
+      shadowColor: c.accent,
+      shadowOpacity: 0.45,
+      shadowRadius: 12,
+      shadowOffset: {width: 0, height: 5},
       gap: 1,
+    },
+    dockPressed: {
+      transform: [{scale: 0.93}],
+      elevation: 6,
+      shadowRadius: 6,
+      shadowOpacity: 0.25,
+    },
+    dockGlyphs: {
+      width: 30,
+      height: 24,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    dockBracketTL: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: 9,
+      height: 9,
+      borderLeftWidth: 2.5,
+      borderTopWidth: 2.5,
+      borderTopLeftRadius: 5,
+      borderColor: '#FFFFFF',
+    },
+    dockBracketTR: {
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      width: 9,
+      height: 9,
+      borderRightWidth: 2.5,
+      borderTopWidth: 2.5,
+      borderTopRightRadius: 5,
+      borderColor: '#FFFFFF',
+    },
+    dockBracketBL: {
+      position: 'absolute',
+      bottom: 0,
+      left: 0,
+      width: 9,
+      height: 9,
+      borderLeftWidth: 2.5,
+      borderBottomWidth: 2.5,
+      borderBottomLeftRadius: 5,
+      borderColor: '#FFFFFF',
+    },
+    dockBracketBR: {
+      position: 'absolute',
+      bottom: 0,
+      right: 0,
+      width: 9,
+      height: 9,
+      borderRightWidth: 2.5,
+      borderBottomWidth: 2.5,
+      borderBottomRightRadius: 5,
+      borderColor: '#FFFFFF',
     },
     dockLabel: {
       color: '#FFFFFF',

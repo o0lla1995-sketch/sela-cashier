@@ -166,7 +166,16 @@ export const CashierApi = {
    */
   scan(
     code: string,
-  ): Promise<{ok: boolean; injected: boolean; known: boolean; productName: string | null}> {
+  ): Promise<{
+    ok: boolean;
+    injected: boolean;
+    /** v3.4 (الجولة 77 #1): هل كُتبت القراءة داخل حقل نصي مركز في
+     *  نقطة البيع (حقل الباركود بنموذج المنتج مثلًا)؟ */
+    wedge?: boolean;
+    reason?: string;
+    known: boolean;
+    productName: string | null;
+  }> {
     return request('POST', '/api/scan', {body: {code}, timeoutMs: 6000});
   },
 

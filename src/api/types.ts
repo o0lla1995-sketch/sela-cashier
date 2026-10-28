@@ -60,6 +60,9 @@ export interface CashierInvoice {
   isReturn: boolean;
   returnedMinor: number;
   paymentType: string;
+  /** v3.4 (الجولة 77): طريقة الدفع الفعلية — بنك/محفظة مفعّلة أو
+   *  «نقدي» — تُعرض شارةً على الفاتورة في أرشيف الكاشير. */
+  paymentMethod?: string;
   itemCount: number;
   createdAt: string;
   /** v2.0: مرجع العملية من هذا الجهاز (لمطابقة الأرشيف المحلي). */
