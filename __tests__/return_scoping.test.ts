@@ -141,3 +141,91 @@ describe('v3.1 — تسجيل المرتجع بفاتورته المصدر', () 
     expect(insert!.params[insert!.params.length - 1]).toBe('C-dev-3');
   });
 });
+
+/* ────────────────────────────────────────────────────────────────
+ * v3.4.1 (الجولة 78 — كاشير #3): حرس التكافؤ الحرفي بين جمل SQL
+ * ومعاملاتها. الجذر: INSERT الفواتير حمل 15 قيمة لـ14 عموداً
+ * (علامة ? زائدة) فرفضها SQLite على الجهاز برسالة
+ * «15 values for 14 columns (SQLITE_ERROR)» عند البيع دون اتصال
+ * مع اختيار طريقة الدفع — والمحاكاة في الاختبارات لا تُصرِّف SQL
+ * أبداً فمرّ الخطأ دون حرّوس. هنا نحاكي فحص SQLite نفسه: عدد
+ * علامات الاستفهام في كل جملة داخل tx يجب أن يساوي عدد معاملاتها،
+ * وعدد القيم في INSERT يساوي عدد أعمدته.
+ * ──────────────────────────────────────────────────────────────── */
+describe('v3.4.1 — تكافؤ علامات الاستفهام مع المعاملات (حرس SQLITE)', () => {
+  test('كل جمل tx: عدد ? يساوي عدد المعاملات — البيع مع طريقة الدفع', async () => {
+    await recordLocalOp({
+      ref: 'C-dev-77',
+      kind: 'sale',
+      displayNumber: 'م-5',
+      payKind: 'cash',
+      payMethod: 'jawwal_pay',
+      total: 48,
+      discount: 2,
+      customerName: 'أحمد',
+      createdAt: '2026-10-28 09:30:00',
+      lines: [
+        {
+          productId: 7,
+          name: 'عصير',
+          variantId: null,
+          variantLabel: null,
+          unitId: null,
+          unitName: 'حبة',
+          quantity: 10,
+          unitPrice: 4.8,
+          lineTotal: 48,
+        },
+      ],
+      payload: {lines: []},
+    });
+
+    const txCalls = captured.filter(call => call.kind === 'tx');
+    expect(txCalls.length).toBeGreaterThanOrEqual(3); // فاتورة + صنف + طابور
+
+    for (const call of txCalls) {
+      const placeholders = (call.sql.match(/\?/g) ?? []).length;
+      expect(placeholders).toBe(call.params.length);
+    }
+
+    // جملة إدراج الفاتورة تحديداً: 14 عموداً تقابلها 14 قيمة و10
+    // معاملات (NULL و'pending' حرفيان داخل الجملة).
+    const invoiceInsert = txCalls.find(c =>
+      c.sql.includes('INSERT INTO invoices'),
+    );
+    expect(invoiceInsert).toBeDefined();
+    const columns = invoiceInsert!.sql.match(/\(([^)]+)\)\s*VALUES/s);
+    expect(columns).toBeDefined();
+    const columnCount = columns![1].split(',').length;
+    const values = invoiceInsert!.sql.match(/VALUES\s*\(([^)]+)\)/s);
+    expect(values).toBeDefined();
+    const valueCount = values![1].split(',').length;
+    expect(columnCount).toBe(14);
+    expect(valueCount).toBe(14);
+    // طريقة الدفع في موضعها الصحيح (العمود السابع، المعامل الخامس).
+    expect(invoiceInsert!.params[4]).toBe('jawwal_pay');
+    // ومصدر الربط آخر المعاملات.
+    expect(invoiceInsert!.params[9]).toBeNull();
+  });
+
+  test('المرتجع دون اتصال: نفس التكافؤ مع source_ref', async () => {
+    await recordLocalOp({
+      ref: 'C-dev-78',
+      kind: 'return',
+      displayNumber: 'م-ر-م-6',
+      payKind: 'refund',
+      payMethod: 'cash',
+      total: -9.6,
+      discount: 0,
+      customerName: null,
+      createdAt: '2026-10-28 10:00:00',
+      sourceRef: 'C-dev-77',
+      lines: [],
+      payload: {saleClientRef: 'C-dev-77', lines: []},
+    });
+    for (const call of captured.filter(c => c.kind === 'tx')) {
+      const placeholders = (call.sql.match(/\?/g) ?? []).length;
+      expect(placeholders).toBe(call.params.length);
+    }
+  });
+});

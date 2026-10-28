@@ -154,10 +154,14 @@ const TABS: {key: TabKey; label: string; icon: IconName}[] = [
   {key: 'me', label: 'حسابي', icon: 'user'},
 ];
 
-/** v3.3.1 (الجولة 76 #9a): زر الماسح اللاسلكي انتقل من زاوية
- *  الشاشة العائمة (كان يحجب المحتوى فوق شريط اللسانات) إلى مركز
- *  شريط اللسانات نفسه — زر بارز مرفوع يجعل أهم ميزة للكاشير في
- *  أبعد مكان عن الإبهامين وبلا أي حجب (طلب التاجر نصاً). */
+/** v3.4.1 (الجولة 78 — كاشير #4): زر الماسح أعيد تصميمه بطلب
+ *  التاجر نصاً — «اجعله أيقونة بدون نص وغير ملاصق للخانة العليا»:
+ *  ① بلا نص «ماسح» — أيقونة إطار الماسح (viewfinder) حول رمز
+ *     الباركود فقط، فصارت مضغوطة ومهنية.
+ *  ② بلا الهامش السالب (-24) الذي كان يرفع الزر خارج شريط
+ *     اللسانات ملاصقاً حافته العليا — الآن يستقر مركز شريطه
+ *     بهواء نظيف من الجهتين كأي لسان، مع إبقاء الهوية البارزة
+ *     (لون العلامة + الظل + انضغاط اللمس). */
 function ScannerDockButton({onPress}: {onPress: () => void}) {
   const styles = useScannerDockStyles();
   const [pressed, setPressed] = useState(false);
@@ -169,16 +173,13 @@ function ScannerDockButton({onPress}: {onPress: () => void}) {
       onPressOut={() => setPressed(false)}
       accessibilityLabel="الماسح اللاسلكي لنقطة البيع"
       android_ripple={{color: 'rgba(255,255,255,0.25)', borderless: true}}>
-      {/* v3.4: قوسا إطار الماسح حول أيقونة الباركود — هوية ماسح
-          واضحة بدل أيقونة عامة، وحلقة توهج ناعمة حول الزر. */}
       <View style={styles.dockGlyphs}>
         <View style={styles.dockBracketTL} />
         <View style={styles.dockBracketTR} />
         <View style={styles.dockBracketBL} />
         <View style={styles.dockBracketBR} />
-        <Icon name="scan" size={21} color="#FFFFFF" />
+        <Icon name="scan" size={20} color="#FFFFFF" />
       </View>
-      <Text style={styles.dockLabel}>ماسح</Text>
     </Pressable>
   );
 }
@@ -564,12 +565,14 @@ const useStyles = makeStyles(c =>
       flexDirection: 'row',
       alignItems: 'center',
     },
-    /** v3.3.1: حضن زر الماسح المركزي — نفس عرض اللسان الواحد
-     *  مع رفع الزر فوق حافة الشريط. */
+    /** v3.3.1: حضن زر الماسح المركزي — نفس عرض اللسان الواحد؛
+     * v3.4.1: الزر مركزه تماماً (بلا رفع) مع هامش رأسي يضمن
+     * عدم ملاصقته للحافة العليا للشريط. */
     dockSlot: {
       flex: 1,
       alignItems: 'center',
       justifyContent: 'center',
+      paddingVertical: 4,
     },
     tab: {
       flex: 1,
@@ -591,35 +594,33 @@ const useStyles = makeStyles(c =>
 
 const useScannerDockStyles = makeStyles(c =>
   StyleSheet.create({
-    /* v3.4 (الجولة 77 — كاشير #2): الزر صُمم من جديد — أكبر قليلاً
-       بلون العلامة، حلقة توهج ناعمة، وقوسا إطار الماسح (viewfinder)
-       حول أيقونة الباركود، وانضغاط لطيف عند اللمس. */
+    /* v3.4.1 (الجولة 78): أيقونة فقط — ٥٠×٥٠ مركز الشريط بلا رفع
+       سالب؛ قوسا إطار الماسح حول رمز الباركود مع توهج ناعم
+       وانضغاط لطيف عند اللمس. */
     dock: {
       alignItems: 'center',
       justifyContent: 'center',
-      width: 62,
-      height: 62,
-      borderRadius: 21,
+      width: 50,
+      height: 50,
+      borderRadius: 17,
       backgroundColor: c.accent,
-      marginTop: -24,
-      borderWidth: 4,
+      borderWidth: 3,
       borderColor: c.surface,
-      elevation: 10,
+      elevation: 6,
       shadowColor: c.accent,
-      shadowOpacity: 0.45,
-      shadowRadius: 12,
-      shadowOffset: {width: 0, height: 5},
-      gap: 1,
+      shadowOpacity: 0.35,
+      shadowRadius: 8,
+      shadowOffset: {width: 0, height: 3},
     },
     dockPressed: {
-      transform: [{scale: 0.93}],
-      elevation: 6,
-      shadowRadius: 6,
-      shadowOpacity: 0.25,
+      transform: [{scale: 0.9}],
+      elevation: 3,
+      shadowRadius: 4,
+      shadowOpacity: 0.2,
     },
     dockGlyphs: {
-      width: 30,
-      height: 24,
+      width: 28,
+      height: 22,
       alignItems: 'center',
       justifyContent: 'center',
     },
@@ -666,11 +667,6 @@ const useScannerDockStyles = makeStyles(c =>
       borderBottomWidth: 2.5,
       borderBottomRightRadius: 5,
       borderColor: '#FFFFFF',
-    },
-    dockLabel: {
-      color: '#FFFFFF',
-      fontFamily: fonts.bold,
-      fontSize: 10.5,
     },
   }),
 );

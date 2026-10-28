@@ -278,11 +278,20 @@ export async function recordLocalOp(input: {
   await initOfflineStore();
   await localDb.tx([
     {
+      /* v3.4.1 (الجولة 78): إصلاح جوهري — كانت VALUES تحمل 15 قيمة
+       * لـ14 عموداً (علامة ? زائدة قبل NULL, NULL) فيرفض SQLite
+       * العملية كلها برسالة SQLITE_ERROR عند البيع دون اتصال مع
+       * اختيار طريقة الدفع. المحاذاة الآن حرفية:
+       *   ref, kind, display_number ← ؟؟؟
+       *   synced_number ← NULL · status ← 'pending'
+       *   pay_kind, payment_method, total, discount, customer_name,
+       *   created_at ← ؟؟؟؟؟؟
+       *   synced_at, reject_reason ← NULL, NULL · source_ref ← ؟ */
       sql: `INSERT INTO invoices
         (ref, kind, display_number, synced_number, status, pay_kind,
          payment_method, total,
          discount, customer_name, created_at, synced_at, reject_reason, source_ref)
-       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
+       VALUES (?, ?, ?, NULL, 'pending', ?, ?, ?, ?, ?, ?, NULL, NULL, ?)`,
       params: [
         input.ref,
         input.kind,
