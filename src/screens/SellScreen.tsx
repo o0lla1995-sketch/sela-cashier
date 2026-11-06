@@ -873,6 +873,10 @@ export function SellScreen() {
   const refreshPayMethods = usePayMethodsStore(state => state.refresh);
   const ensurePayMethods = usePayMethodsStore(state => state.ensureLoaded);
   const [payPicker, setPayPicker] = useState(false);
+  /** v3.6 (الجولة 92 — كاشير #٣): الطريقة المحددة داخل نافذة
+   *  الدفع — لا بيع إلا بعد تأكيد صريح بزر التأكيد (نفس نقطة
+   *  البيع أندرويد؛ كانت البطاقة تبيع فور لمسها بلا زر تأكيد). */
+  const [pickedMethod, setPickedMethod] = useState<string | null>(null);
   const [discountText, setDiscountText] = useState('');
   /** v3.2 (الجولة 74 #7): وضع إدخال الخصم — نسبة ٪ أو مبلغ ₪.
    *  الافتراضي مبلغ (كما كان)؛ النسبة تحسب من مجموع السلة وتخضع
@@ -2069,13 +2073,20 @@ export function SellScreen() {
       {/* v3.3 (الجولة 75): نافذة اختيار طريقة الدفع — تفتح قبل
           إتمام البيع عند تفعيل بنوك/محافظ عند المدير (طلب التاجر
           الصريح: «في كل التطبيقات سواء سطح المكتب أو أندرويد أو
-          كاشير»). النقدي وحده يبيع مباشرة بلا نافذة. */}
+          كاشير»). النقدي وحده يبيع مباشرة بلا نافذة.
+          v3.6 (الجولة 92 — كاشير #٣): اللمس يحدّد فقط، والبيع لا
+          يتم إلا بزر «تأكيد الدفع» — كما في تطبيق نقطة البيع
+          أندرويد تماماً (كانت البطاقة تبيع فور لمسها فلا يظهر أي
+          زر تأكيد — شكوى التاجر نصاً). */}
       {payPicker ? (
         <View style={styles.payOverlay}>
           <TouchableOpacity
             style={styles.payOverlayDim}
             activeOpacity={1}
-            onPress={() => setPayPicker(false)}
+            onPress={() => {
+              setPayPicker(false);
+              setPickedMethod(null);
+            }}
           />
           <View style={styles.paySheet}>
             <View style={styles.payHandle} />
@@ -2084,43 +2095,77 @@ export function SellScreen() {
               المطلوب: {formatMoney(cart.total())}
             </Text>
             <View style={styles.payGrid}>
-              {payMethods.map(m => (
-                <TouchableOpacity
-                  key={m.id}
-                  style={[styles.payCard, {borderColor: m.color + '55'}]}
-                  activeOpacity={0.7}
-                  onPress={() => {
-                    setPayPicker(false);
-                    void completeSale('cash', undefined, m.id);
-                  }}>
-                  {/* v3.4 (الجولة 77): الشعار الرسمي الحقيقي لكل بنك
-                      ومحفظة (أيقونة تطبيقها على Google Play) بدل
-                      حرفي الاسم — النقدي يبقى رقاقة ₪. */}
-                  {m.kind === 'cash' ? (
-                    <View
-                      style={[styles.payIconChip, {backgroundColor: m.color}]}>
-                      <Text style={styles.payIconMark}>₪</Text>
-                    </View>
-                  ) : (
-                    <PaymentMethodLogo methodId={m.id} size={44} />
-                  )}
-                  <Text style={styles.payCardLabel} numberOfLines={1}>
-                    {m.label}
-                  </Text>
-                  <Text style={styles.payCardKind} numberOfLines={1}>
-                    {m.kind === 'cash'
-                      ? 'الخزينة النقدية'
-                      : m.kind === 'bank'
-                      ? 'تحويل بنكي'
-                      : 'محفظة إلكترونية'}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+              {payMethods.map(m => {
+                const selected = pickedMethod === m.id;
+                return (
+                  <TouchableOpacity
+                    key={m.id}
+                    style={[
+                      styles.payCard,
+                      {borderColor: m.color + '55'},
+                      selected ? styles.payCardSelected : null,
+                    ]}
+                    activeOpacity={0.7}
+                    onPress={() => setPickedMethod(m.id)}>
+                    {/* v3.4 (الجولة 77): الشعار الرسمي الحقيقي لكل بنك
+                        ومحفظة (أيقونة تطبيقها على Google Play) بدل
+                        حرفي الاسم — النقدي يبقى رقاقة ₪. */}
+                    {m.kind === 'cash' ? (
+                      <View
+                        style={[styles.payIconChip, {backgroundColor: m.color}]}>
+                        <Text style={styles.payIconMark}>₪</Text>
+                      </View>
+                    ) : (
+                      <PaymentMethodLogo methodId={m.id} size={44} />
+                    )}
+                    <Text style={styles.payCardLabel} numberOfLines={1}>
+                      {m.label}
+                    </Text>
+                    <Text style={styles.payCardKind} numberOfLines={1}>
+                      {m.kind === 'cash'
+                        ? 'الخزينة النقدية'
+                        : m.kind === 'bank'
+                        ? 'تحويل بنكي'
+                        : 'محفظة إلكترونية'}
+                    </Text>
+                    {selected ? (
+                      <View style={styles.payCheckChip}>
+                        <Icon name="check" size={13} color="#FFFFFF" />
+                      </View>
+                    ) : null}
+                  </TouchableOpacity>
+                );
+              })}
             </View>
+            {/* v3.6: زر التأكيد بعد اختيار القناة — معطّل حتى الاختيار،
+                ويحمل اسم القناة المحددة وتُخزَّن مع الفاتورة فعلياً. */}
+            <AppButton
+              title={
+                pickedMethod == null
+                  ? 'اختر طريقة الدفع أولاً'
+                  : `تأكيد الدفع عبر ${
+                      payMethods.find(m => m.id === pickedMethod)?.label ?? ''
+                    } — ${formatMoney(cart.total())}`
+              }
+              icon="check"
+              disabled={pickedMethod == null || busy}
+              loading={busy}
+              onPress={() => {
+                if (pickedMethod == null) {
+                  return;
+                }
+                setPayPicker(false);
+                void completeSale('cash', undefined, pickedMethod);
+                setPickedMethod(null);
+              }}
+            />
             <AppButton
               title="إلغاء"
               variant="secondary"
-              onPress={() => setPayPicker(false)}
+              onPress={() => {
+                setPayPicker(false);
+                setPickedMethod(null);
+              }}
             />
           </View>
         </View>
@@ -2545,6 +2590,22 @@ const useStyles = makeStyles(c =>
       borderRadius: 14,
       borderWidth: 2,
       backgroundColor: c.surfaceAlt,
+    },
+    /* v3.6 (الجولة 92 — كاشير #٣): البطاقة المحددة قبل التأكيد. */
+    payCardSelected: {
+      backgroundColor: c.accentSofter,
+      borderColor: c.accent,
+    },
+    payCheckChip: {
+      position: 'absolute',
+      top: 6,
+      left: 6,
+      width: 20,
+      height: 20,
+      borderRadius: 10,
+      backgroundColor: c.accent,
+      alignItems: 'center',
+      justifyContent: 'center',
     },
     payIconChip: {
       width: 44,

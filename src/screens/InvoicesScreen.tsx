@@ -279,8 +279,15 @@ export function InvoicesScreen() {
         </View>
       </View>
 
-      {/* فلترة النوع — نمط نقطة البيع */}
-      <View style={styles.kindRow}>
+      {/* v3.6 (الجولة 92 — كاشير #١): فلترة النوع وفلاتر قنوات
+          الدفع في نفس الصف — طلب التاجر نصاً. رقائق النوع أولاً ثم
+          فاصل رفيع فرقائق القنوات بشعاراتها، والصف كله يتمرّر
+          أفقياً عند ضيق الشاشة (نفس شكل رقائق النقطة البيع). */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        style={styles.kindRowScroll}
+        contentContainerStyle={styles.kindRowContent}>
         {(
           [
             {key: 'all', label: 'الكل'},
@@ -308,52 +315,47 @@ export function InvoicesScreen() {
             </Pressable>
           );
         })}
-      </View>
-
-      {/* v3.5 (الجولة 91 — كاشير #4): فلتر قناة الدفع — رقائق
-          ديناميكية من طرق الدفع المفعّلة عند التاجر (بنوك ومحافظ)
-          + النقدي؛ يظهر فقط عند وجود أكثر من نقدي. */}
-      {payMethods.length > 1 ? (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.payFilterRow}
-          contentContainerStyle={{gap: 6, paddingHorizontal: spacing.md}}>
-          {[{id: 'all', label: 'كل القنوات', color: c.accent}, ...payMethods].map(
-            method => {
-              const active = payFilter === method.id;
-              return (
-                <Pressable
-                  key={method.id}
-                  style={[
-                    styles.payChip,
-                    active
-                      ? {borderColor: c.accent, backgroundColor: c.accentSoft}
-                      : null,
-                  ]}
-                  onPress={() => setPayFilter(method.id)}>
-                  {method.id !== 'all' && method.id !== 'cash' ? (
-                    <PaymentMethodLogo methodId={method.id} size={16} />
-                  ) : method.id === 'cash' ? (
-                    <View
-                      style={[styles.payChipCash, {backgroundColor: method.color}]}>
-                      <Text style={styles.payChipMark}>₪</Text>
-                    </View>
-                  ) : null}
-                  <Text
+        {payMethods.length > 1 ? (
+          <>
+            <View style={styles.filterDivider} />
+            {[{id: 'all', label: 'كل القنوات', color: c.accent}, ...payMethods].map(
+              method => {
+                const active = payFilter === method.id;
+                return (
+                  <Pressable
+                    key={method.id}
                     style={[
-                      styles.payChipText,
-                      active ? {color: c.accent, fontFamily: fonts.bold} : null,
+                      styles.kindChip,
+                      styles.payChipInKindRow,
+                      active ? styles.kindChipActive : null,
                     ]}
-                    numberOfLines={1}>
-                    {method.label}
-                  </Text>
-                </Pressable>
-              );
-            },
-          )}
-        </ScrollView>
-      ) : null}
+                    onPress={() => setPayFilter(method.id)}>
+                    {method.id !== 'all' && method.id !== 'cash' ? (
+                      <PaymentMethodLogo methodId={method.id} size={16} />
+                    ) : method.id === 'cash' ? (
+                      <View
+                        style={[
+                          styles.payChipCash,
+                          {backgroundColor: method.color},
+                        ]}>
+                        <Text style={styles.payChipMark}>₪</Text>
+                      </View>
+                    ) : null}
+                    <Text
+                      style={[
+                        styles.kindText,
+                        active ? {color: c.accent, fontFamily: fonts.bold} : null,
+                      ]}
+                      numberOfLines={1}>
+                      {method.label}
+                    </Text>
+                  </Pressable>
+                );
+              },
+            )}
+          </>
+        ) : null}
+      </ScrollView>
 
       {/* v3.5: فلتر حالة المزامنة — لإيجاد المعلقة والمرفوضة بسرعة. */}
       <View style={styles.kindRow}>
@@ -1891,6 +1893,26 @@ const useStyles = makeStyles(c =>
       paddingHorizontal: spacing.md,
       paddingBottom: 6,
     },
+    /* v3.6 (الجولة 92 — كاشير #١): صف الفلترة الموحّد — النوع
+       والقنوات معاً في صف واحد قابل للتمرير الأفقي. */
+    kindRowScroll: {flexGrow: 0, paddingBottom: 6},
+    kindRowContent: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 6,
+      paddingHorizontal: spacing.md,
+    },
+    filterDivider: {
+      width: 1,
+      alignSelf: 'stretch',
+      marginVertical: 3,
+      backgroundColor: c.borderSoft,
+    },
+    payChipInKindRow: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+    },
     kindChip: {
       backgroundColor: c.surface,
       borderWidth: 1,
@@ -1906,19 +1928,6 @@ const useStyles = makeStyles(c =>
       fontSize: typography.small,
     },
     padded: {paddingHorizontal: spacing.md, paddingBottom: 6},
-    // v3.5 (الجولة 91 — كاشير #4): رقائق فلتر قناة الدفع.
-    payFilterRow: {flexGrow: 0, paddingBottom: 4},
-    payChip: {
-      flexDirection: 'row',
-      alignItems: 'center',
-      gap: 6,
-      backgroundColor: c.surface,
-      borderWidth: 1,
-      borderColor: c.border,
-      borderRadius: 999,
-      paddingHorizontal: 10,
-      paddingVertical: 4,
-    },
     payChipCash: {
       width: 16,
       height: 16,

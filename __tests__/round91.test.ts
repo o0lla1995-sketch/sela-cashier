@@ -442,23 +442,23 @@ describe('v3.5 (كاشير #4) — فلاتر أرشيف الفواتير', () =
 // ── ⑤ مسامير الإصدار ────────────────────────────────────────────
 
 describe('v3.5 — مسامير الإصدار', () => {
-  test('config: 3.5.0 (12)', () => {
-    expect(APP_VERSION).toBe('3.5.0');
-    expect(APP_BUILD_CODE).toBe(12);
-    expect(APP_VERSION_LABEL).toBe('3.5.0 (12)');
+  test('config: 3.6.0 (13)', () => {
+    expect(APP_VERSION).toBe('3.6.0');
+    expect(APP_BUILD_CODE).toBe(13);
+    expect(APP_VERSION_LABEL).toBe('3.6.0 (13)');
   });
 
-  test('build.gradle: versionCode 12 و versionName 3.5.0', () => {
+  test('build.gradle: versionCode 13 و versionName 3.6.0', () => {
     const fs = require('fs') as typeof import('fs');
     const gradle = fs.readFileSync('android/app/build.gradle', 'utf8');
-    expect(gradle).toContain('versionCode 12');
-    expect(gradle).toContain('versionName "3.5.0"');
+    expect(gradle).toContain('versionCode 13');
+    expect(gradle).toContain('versionName "3.6.0"');
   });
 
-  test('package.json: 3.5.0', () => {
+  test('package.json: 3.6.0', () => {
     const pkg = JSON.parse(
       (require('fs') as typeof import('fs')).readFileSync('package.json', 'utf8'),
     ) as {version: string};
-    expect(pkg.version).toBe('3.5.0');
+    expect(pkg.version).toBe('3.6.0');
   });
 });

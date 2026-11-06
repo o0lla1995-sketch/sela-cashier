@@ -7,10 +7,10 @@
  */
 
 /** الإصدار الدلالي المعروض للتاجر. */
-export const APP_VERSION = '3.5.0';
+export const APP_VERSION = '3.6.0';
 
 /** رمز البناء الأندرويد (versionCode) — يرتفع مع كل إصدار. */
-export const APP_BUILD_CODE = 12;
+export const APP_BUILD_CODE = 13;
 
 /** التسمية الكاملة كما تظهر في «حسابي». */
 export const APP_VERSION_LABEL = `${APP_VERSION} (${APP_BUILD_CODE})`;
