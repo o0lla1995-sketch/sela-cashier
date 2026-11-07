@@ -413,7 +413,12 @@ export function InvoicesScreen() {
           }
         />
       ) : (
+        /* v3.7 (الجولة 93 — كاشير #٣): القائمة flex:1 صراحةً — بلاها
+           كان محتواها يدفع صفوف الفلاتر للأعلى وتكاد تختفي مع كثرة
+           الفواتير (شكوى التاجر نصاً)؛ الآن الفلاتر مثبتة أعلى
+           والقائمة تتمدد فيما تبقى من الشاشة. */
         <ScrollView
+          style={{flex: 1}}
           contentContainerStyle={{
             padding: spacing.md,
             gap: 8,
@@ -899,6 +904,19 @@ function ReturnSheet({
   const [exchangePicks, setExchangePicks] = useState<ExchangePick[]>([]);
   const [exchangeOpen, setExchangeOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  // v3.7 (الجولة 93 — كاشير #٢): قناة تسوية المرتجع/فرق الاستبدال —
+  // طلب التاجر نصاً: «الخصم من الأصل او الإضافة الي خيار دفع جديد».
+  // الافتراض هو القناة الأصلية التي دُفعت بها الفاتورة (invoice.payMethod)
+  // إن كانت محفظة/بنك — والكاشير يغيّرها من الرقائق إن أراد. فواتير
+  // الدين تُسوّى في الدفتر فلا قناة لها.
+  const payMethods = usePayMethodsStore(state => state.methods);
+  const [refundChannel, setRefundChannel] = useState<string>(
+    invoice.payKind === 'cash' &&
+    invoice.payMethod != null &&
+    invoice.payMethod !== 'cash'
+      ? invoice.payMethod
+      : 'cash',
+  );
 
   // المرتجعات المحلية السابقة من هذه الفاتورة بالذات (source_ref):
   // مع لقطة الخادم نعدّ المعلّقة فقط (المتزامنة محسوبة داخل اللقطة)،
@@ -949,6 +967,16 @@ function ReturnSheet({
   );
   const exchangeModeOn = exchangePicks.length > 0;
   const exchangeDiff = refundTotal - exchangeTotal;
+  const channelLabel =
+    refundChannel !== 'cash'
+      ? payMethods.find(m => m.id === refundChannel)?.label ?? ''
+      : '';
+  // v3.7: منتقي القناة يظهر للمرتجع المالي ولفرق الاستبدال بالاتجاهين
+  // (فواتير النقد فقط — الدين يُسوّى في دفتره).
+  const channelPickerVisible =
+    payMethods.length > 1 &&
+    invoice.payKind === 'cash' &&
+    (!exchangeModeOn || Math.abs(exchangeDiff) > 0.0001);
 
   const confirm = useCallback(async () => {
     if (busy || refundTotal <= 0) {
@@ -1033,6 +1061,9 @@ function ReturnSheet({
           })),
           exchange: exchangeLines,
           refundMethod: exchangeModeOn ? 'none' : 'cash',
+          // v3.7 (الجولة 93 — كاشير #٢): قناة التسوية — القناة الأصلية
+          // للفاتورة افتراضاً (أو ما يختاره الكاشير) بدل النقدي الدائم.
+          refundChannel: invoice.payKind === 'cash' ? refundChannel : 'cash',
           clientRef,
           createdAt,
           print: printReceipts,
@@ -1040,11 +1071,17 @@ function ReturnSheet({
         onToast(
           exchangeModeOn
             ? exchangeDiff > 0.0001
-              ? `سُجّل الاستبدال — سلّم الزبون الفرق ${formatMoney(exchangeDiff)} نقداً من الخزينة`
+              ? channelLabel
+                ? `سُجّل الاستبدال — حوّل للزبون الفرق ${formatMoney(exchangeDiff)} عبر ${channelLabel}`
+                : `سُجّل الاستبدال — سلّم الزبون الفرق ${formatMoney(exchangeDiff)} نقداً من الخزينة`
               : exchangeDiff < -0.0001
-              ? `سُجّل الاستبدال — قبض الفرق ${formatMoney(-exchangeDiff)} نقداً من الزبون`
+              ? channelLabel
+                ? `سُجّل الاستبدال — استلم الفرق ${formatMoney(-exchangeDiff)} من الزبون عبر ${channelLabel}`
+                : `سُجّل الاستبدال — قبض الفرق ${formatMoney(-exchangeDiff)} نقداً من الزبون`
               : 'سُجّل الاستبدال المتكافئ — لا فرق'
-            : 'سُجِّل المرتجع في نقطة البيع',
+            : channelLabel
+            ? `سُجّل المرتجع — حوّل للزبون ${formatMoney(refundTotal)} عبر ${channelLabel} وأُعيدت الكميات للمخزون`
+            : 'سُجّل المرتجع في نقطة البيع',
           'success',
         );
         if (payload.printed) {
@@ -1130,14 +1167,17 @@ function ReturnSheet({
           })),
           exchange: exchangeLines,
           refundMethod: exchangeModeOn ? 'none' : 'cash',
+          // v3.7: القناة تسافر مع الحمولة المؤقتة — تُنفّذ عند المزامنة
+          // بنفس منطق الطلب المباشر أعلاه (نقطة البيع تدعمها منذ v69).
+          refundChannel: invoice.payKind === 'cash' ? refundChannel : 'cash',
           clientRef,
           createdAt,
         },
       });
       onToast(
         exchangeModeOn
-          ? 'سُجِّل الاستبدال محلياً — يُزامَن فور عودة الاتصال'
-          : 'سُجِّل المرتجع محلياً — يُزامَن فور عودة الاتصال',
+          ? `سُجِّل الاستبدال محلياً${channelLabel ? ` — الفرق عبر ${channelLabel}` : ''} — يُزامَن فور عودة الاتصال`
+          : `سُجِّل المرتجع محلياً${channelLabel ? ` — عبر ${channelLabel}` : ''} — يُزامَن فور عودة الاتصال`,
         'success',
       );
       // v3.2: المرتجع يعيد المخزون محلياً فوق آخر مزامنة فوراً.
@@ -1338,6 +1378,67 @@ function ReturnSheet({
             </View>
           )}
 
+          {/* v3.7 (الجولة 93 — كاشير #٢): قناة تسوية المرتجع/الفرق —
+              افتراضها القناة الأصلية للفاتورة («الخصم من الأصل») —
+              طلب التاجر نصاً — والكاشير قد يختار خيار دفع جديد. */}
+          {channelPickerVisible ? (
+            <View style={styles.channelPickerBox}>
+              <Text style={styles.channelPickerLabel}>
+                {exchangeModeOn
+                  ? 'قناة تسوية فرق الاستبدال'
+                  : 'قناة استرداد المرتجع'}
+                {invoice.payMethod != null &&
+                invoice.payMethod !== 'cash' &&
+                refundChannel === invoice.payMethod
+                  ? ' — القناة الأصلية للفاتورة'
+                  : ''}
+              </Text>
+              <ScrollView
+                horizontal
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.channelPickerRow}>
+                {payMethods.map(method => {
+                  const on = refundChannel === method.id;
+                  const isOriginal =
+                    invoice.payMethod != null &&
+                    invoice.payMethod === method.id &&
+                    method.id !== 'cash';
+                  return (
+                    <Pressable
+                      key={method.id}
+                      style={[
+                        styles.channelChip,
+                        on ? styles.channelChipActive : null,
+                      ]}
+                      disabled={busy}
+                      onPress={() => setRefundChannel(method.id)}>
+                      {method.id !== 'cash' ? (
+                        <PaymentMethodLogo methodId={method.id} size={18} />
+                      ) : (
+                        <View
+                          style={[
+                            styles.channelCashMark,
+                            {backgroundColor: method.color},
+                          ]}>
+                          <Text style={styles.channelCashText}>₪</Text>
+                        </View>
+                      )}
+                      <Text
+                        style={[
+                          styles.channelChipText,
+                          on ? {color: c.accent, fontWeight: '900'} : null,
+                        ]}
+                        numberOfLines={1}>
+                        {method.label}
+                        {isOriginal ? ' ★' : ''}
+                      </Text>
+                    </Pressable>
+                  );
+                })}
+              </ScrollView>
+            </View>
+          ) : null}
+
           {exchangeModeOn ? (
             <View
               style={[
@@ -1360,8 +1461,8 @@ function ReturnSheet({
                 {Math.abs(exchangeDiff) < 0.0001
                   ? 'استبدال متكافئ — لا فرق'
                   : exchangeDiff > 0
-                  ? `الفرق ${formatMoney(exchangeDiff)} — سلّمه نقداً من الخزينة`
-                  : `الفرق ${formatMoney(-exchangeDiff)} — اقبضه نقداً من الزبون`}
+                  ? `الفرق ${formatMoney(exchangeDiff)} — حوّله للزبون ${channelLabel ? `عبر ${channelLabel}` : 'نقداً من الخزينة'}`
+                  : `الفرق ${formatMoney(-exchangeDiff)} — اقبضه ${channelLabel ? `عبر ${channelLabel}` : 'نقداً من الزبون'}`}
               </Text>
             </View>
           ) : null}
@@ -2300,6 +2401,61 @@ const useReturnStyles = makeStyles(c =>
       fontFamily: fonts.medium,
       fontSize: typography.small,
       textAlign: 'right',
+    },
+    /* v3.7 (الجولة 93 — كاشير #٢): صندوق اختيار قناة التسوية —
+     * شريط رقائق أفقي بشعارات الجهات، النقدي أولاً. */
+    channelPickerBox: {
+      backgroundColor: c.surfaceAlt,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 12,
+      paddingHorizontal: 10,
+      paddingVertical: 8,
+      marginBottom: 8,
+    },
+    channelPickerLabel: {
+      color: c.textFaint,
+      fontFamily: fonts.medium,
+      fontSize: typography.micro,
+      marginBottom: 6,
+      textAlign: 'right',
+    },
+    channelPickerRow: {
+      flexDirection: 'row',
+      gap: 6,
+      alignItems: 'center',
+    },
+    channelChip: {
+      flexDirection: 'row',
+      alignItems: 'center',
+      gap: 5,
+      borderWidth: 1,
+      borderColor: c.border,
+      borderRadius: 999,
+      paddingHorizontal: 10,
+      paddingVertical: 5,
+      backgroundColor: c.surface,
+    },
+    channelChipActive: {
+      borderColor: c.accent,
+      backgroundColor: c.accentSoft,
+    },
+    channelChipText: {
+      color: c.textDim,
+      fontFamily: fonts.medium,
+      fontSize: typography.small,
+    },
+    channelCashMark: {
+      width: 18,
+      height: 18,
+      borderRadius: 6,
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    channelCashText: {
+      color: '#FFFFFF',
+      fontSize: 11,
+      fontWeight: '900',
     },
     actionsRow: {flexDirection: 'row', gap: 8, alignItems: 'center'},
     exchangeCompactBtn: {

@@ -8,7 +8,7 @@
  * ② (كاشير #3 — زر التأكيد): لمس البطاقة يحدّدها فقط؛ لا بيع إلا
  *    بضغط «تأكيد الدفع عبر …» (كما في نقطة البيع أندرويد) — كانت
  *    البطاقة تبيع فور لمسها فلا زر تأكيد إطلاقاً.
- * ③ مسامير الإصدار 3.6.0 (13).
+ * ③ مسامير الإصدار 3.7.0 (14) — حُدّثت للجولة 93.
  */
 import {describe, expect, test} from '@jest/globals';
 import {readFileSync} from 'node:fs';
@@ -72,20 +72,20 @@ describe('v3.6 (كاشير #3) — زر تأكيد الدفع بعد اختيا�
 });
 
 describe('v3.6 — مسامير الإصدار', () => {
-  test('config: 3.6.0 (13)', () => {
-    expect(APP_VERSION).toBe('3.6.0');
-    expect(APP_BUILD_CODE).toBe(13);
-    expect(APP_VERSION_LABEL).toBe('3.6.0 (13)');
+  test('config: 3.7.0 (14)', () => {
+    expect(APP_VERSION).toBe('3.7.0');
+    expect(APP_BUILD_CODE).toBe(14);
+    expect(APP_VERSION_LABEL).toBe('3.7.0 (14)');
   });
 
-  test('build.gradle: versionCode 13 و versionName 3.6.0', () => {
+  test('build.gradle: versionCode 14 و versionName 3.7.0', () => {
     const gradle = read('android/app/build.gradle');
-    expect(gradle).toContain('versionCode 13');
-    expect(gradle).toContain('versionName "3.6.0"');
+    expect(gradle).toContain('versionCode 14');
+    expect(gradle).toContain('versionName "3.7.0"');
   });
 
-  test('package.json: 3.6.0', () => {
+  test('package.json: 3.7.0', () => {
     const pkg = JSON.parse(read('package.json')) as {version: string};
-    expect(pkg.version).toBe('3.6.0');
+    expect(pkg.version).toBe('3.7.0');
   });
 });

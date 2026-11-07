@@ -306,6 +306,10 @@ export const CashierApi = {
     }[];
     exchange?: SaleLineInput[];
     refundMethod?: 'cash' | 'none';
+    /** v3.7 (الجولة 93 — كاشير #٢): قناة تسوية المرتجع/فرق
+     * الاستبدال — القناة الأصلية للفاتورة افتراضاً؛ نقطة البيع
+     * تدعمها منذ v69 (المرتجع يُخصم من القناة لا من النقدي). */
+    refundChannel?: string;
     note?: string;
     clientRef?: string;
     createdAt?: string;
